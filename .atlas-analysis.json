@@ -1,0 +1,101 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "Tool-Call Mechanistic Interpretability",
+  "projectDescription": "Mechanistic interpretability research on how GPT-2 models decide when to call tools versus answer directly.",
+  "theme": "aspen",
+  "primaryColor": "#6366f1",
+  "lightColor": "#818cf8",
+  "darkColor": "#4f46e5",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/research-question",
+              "concepts/dataset-design",
+              "concepts/methodology",
+              "concepts/confound-balancing"
+            ]
+          },
+          {
+            "group": "Experiments",
+            "pages": [
+              "experiments/pipeline-overview",
+              "experiments/data-generation",
+              "experiments/fine-tuning",
+              "experiments/running-analysis"
+            ]
+          },
+          {
+            "group": "Analysis Methods",
+            "pages": [
+              "analysis/activation-patching",
+              "analysis/logit-attribution",
+              "analysis/sae-features",
+              "analysis/circuit-discovery",
+              "analysis/attention-analysis"
+            ]
+          },
+          {
+            "group": "Results",
+            "pages": [
+              "results/overview",
+              "results/findings",
+              "results/visualizations",
+              "results/limitations"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Modules",
+            "pages": [
+              "api/data",
+              "api/finetune",
+              "api/analysis",
+              "api/visualization",
+              "api/utils"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Adversarially balanced dataset generation for confound-free analysis",
+    "GPT-2 fine-tuning on tool-calling decisions",
+    "Activation patching for causal head importance",
+    "Direct logit attribution (DLA) for output contribution analysis",
+    "Sparse autoencoder (SAE) feature analysis",
+    "Circuit discovery and ablation studies",
+    "Attention pattern visualization and analysis",
+    "Training dynamics tracking",
+    "Comprehensive robustness testing"
+  ],
+  "publicApiSurface": [
+    "generate_dataset() - Generate adversarially balanced synthetic dataset",
+    "run_pipeline.py - Main orchestrator for all experiment phases",
+    "run_activation_patching() - Identify causally important attention heads",
+    "compute_dla() - Direct logit attribution analysis",
+    "analyze_layer() - SAE feature analysis for interpretability",
+    "identify_circuit_heads() - Synthesize circuit from patching and DLA",
+    "ablate_circuit() - Test circuit necessity",
+    "ablate_non_circuit() - Test circuit sufficiency",
+    "Trainer - Fine-tuning loop with mixed precision",
+    "evaluate_test_set() - Comprehensive model evaluation"
+  ]
+}
