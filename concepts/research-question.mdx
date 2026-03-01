@@ -1,0 +1,82 @@
+---
+title: "Research Question"
+description: "The core research question driving this mechanistic interpretability project"
+---
+
+## What Question Is This Project Trying to Answer?
+
+This project investigates a simple but underexplored question: **when a language model decides to call a tool versus answer directly, what's actually happening inside the network?**
+
+Large language models are increasingly used as agents that can invoke external tools (calculators, search engines, APIs). But we have no mechanistic understanding of *how* the model makes that binary decision.
+
+<Info>
+**Primary question:** How do transformer circuits decide when to call a tool versus answer directly? Can we identify specific attention heads or SAE features that drive tool-invocation decisions?
+
+**Secondary question:** Are the circuits identified under standard datasets robust to adversarial confound removal, or do they partially reflect surface-feature shortcuts?
+</Info>
+
+This experiment uses interpretability techniques from the circuits literature — activation patching, direct logit attribution (DLA), and sparse autoencoder (SAE) feature analysis — to reverse-engineer the "tool decision circuit" inside a fine-tuned GPT-2 Small (124M parameters).
+
+## Why Is This Important for AI Safety/Interpretability?
+
+Understanding tool-calling decisions matters for several reasons:
+
+1. **Agentic behavior transparency**: As models become more autonomous agents, we need to understand *why* they choose to invoke tools rather than answer directly
+
+2. **Surface shortcut detection**: Many interpretability findings may actually reflect dataset confounds rather than genuine reasoning. This project demonstrates how adversarial dataset design can reveal when models rely on shortcuts vs. real understanding
+
+3. **Circuit robustness**: By testing whether identified circuits remain stable when surface features are balanced, we can evaluate the reliability of circuit-level interpretability claims
+
+4. **Distributed vs. localized computation**: The project reveals whether complex decisions like tool-calling localize to small head subsets (as in some prior circuit work) or require distributed, redundant computation
+
+<Warning>
+**Key finding**: The "clean circuit" found with confounded data was partially an artifact. When surface features like number detection were balanced across classes, the circuit became highly distributed and redundant rather than sparse and localized.
+</Warning>
+
+## Related Work
+
+We could not find direct prior circuit-level mechanistic interpretability work targeting tool-calling decisions specifically. The closest related work includes:
+
+### Induction Head Circuits
+**Olsson et al., 2022** - Identified specific attention heads responsible for in-context learning, establishing the methodology we extend here.
+
+This work demonstrated that complex capabilities can localize to identifiable circuit components and provided the activation patching methodology used in this project.
+
+### IOI Circuit
+**Wang et al., 2023** - Reverse-engineered a 26-head circuit for indirect object identification, demonstrating that complex behaviors localize to small head subsets.
+
+This established expectations that tasks requiring "reasoning" might have sparse, interpretable circuits — an expectation this project challenges with adversarial dataset design.
+
+### Function Vectors
+**Todd et al., 2024** - Showed that task-specific behavior can be extracted as linear directions in activation space.
+
+This work demonstrated that task representations can be identified in activation space, complementing the circuit-level analysis in this project.
+
+## Search Process
+
+We searched Google Scholar and Semantic Scholar for:
+- "function calling mechanistic interpretability"
+- "tool calling circuits transformer"
+- "residual stream tool use"
+- "agentic decision mechanistic"
+
+These searches did not surface direct circuit-level analyses of tool/no-tool decisions, suggesting this is a novel application domain for mechanistic interpretability techniques.
+
+## What Makes This Project Different
+
+This work extends circuit analysis techniques to a novel domain (tool-use decisions) and adds an **adversarial confound-balancing methodology** that reveals important limitations of the standard approach:
+
+<CardGroup cols={2}>
+  <Card title="Standard Approach" icon="magnifying-glass">
+    Train on typical dataset → identify important heads → claim circuit discovery
+  </Card>
+  <Card title="This Project's Approach" icon="shield-check">
+    Train on adversarially balanced dataset → test if circuits survive confound removal → reveal shortcuts vs. genuine reasoning
+  </Card>
+</CardGroup>
+
+The adversarial balancing reveals a tension in mechanistic interpretability: **the circuits we find depend on the confounds we allow.** A clean, localized circuit emerged when surface features correlated with the label. Removing those correlations didn't destroy the model's ability to learn the task (99.5% accuracy), but it did destroy the clean circuit.
+
+<Note>
+This project demonstrates that correlation-based interpretability methods can produce deeply misleading results, and causal interventions are non-negotiable for mechanistic claims.
+</Note>

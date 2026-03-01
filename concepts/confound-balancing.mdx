@@ -1,0 +1,251 @@
+---
+title: "Confound Balancing"
+description: "Why confound balancing matters and how it reveals surface shortcuts"
+---
+
+## What Are Confounds in ML Interpretability?
+
+A **confound** is a feature that correlates with the label but is not part of the intended task. In mechanistic interpretability, confounds can lead to discovering "circuits" that solve an easier proxy task rather than the target task.
+
+<Info>
+**Example**: In a dataset of tool-calling decisions, if numbers appear mainly in tool-needed prompts, the model might learn to detect numbers rather than reasoning about whether execution is required.
+</Info>
+
+### The Problem
+
+When we identify "important heads" through activation patching or other techniques, we might be finding:
+- ✅ Heads that reason about tool-need (what we want)
+- ❌ Heads that detect surface features correlated with tool-need (shortcuts)
+
+Without controlling for confounds, we can't distinguish between these cases.
+
+## The Number Detection Shortcut Problem
+
+In the original (unbalanced) dataset, a clear confound existed:
+
+<Warning>
+**Confound**: Numbers appeared much more frequently in tool-call examples than no-tool examples.
+
+**Result**: The model could achieve high accuracy by learning "if numbers present → call tool" without genuine tool-need reasoning.
+</Warning>
+
+### Original Dataset Analysis
+
+From the original analysis (before confound balancing), head **L6H4** dominated with a patching score of **4.28** — roughly **3× higher than any other head**.
+
+This head appeared to be the "tool decision head."
+
+### What Happened When Numbers Were Balanced?
+
+From RESULTS.md:261-262:
+
+<Warning>
+**L6H4 — the dominant head in the original analysis — has a patching score near zero** (rank far outside the top 15). This is strong evidence that L6H4's original dominance was driven by number-detection shortcuts rather than genuine tool-need reasoning.
+</Warning>
+
+Attention pattern analysis confirmed this (RESULTS.md:356-366):
+
+| Token Type | Tool Prompts | No-Tool Prompts |
+|------------|--------------|------------------|
+| Other tokens | 86.9% | 93.6% |
+| Punctuation | 10.4% | 5.0% |
+| Tool names | 1.7% | 0.8% |
+| **Numbers** | **0.6%** | **0.2%** |
+
+<Info>
+**L6H4 is no longer a number detector.** With the adversarially balanced dataset, L6H4 predominantly attends to the "User" token and generic context tokens in both classes. When numbers appear equally in both classes, L6H4 stops attending to them and becomes largely inert.
+</Info>
+
+## How This Dataset Eliminates Surface Shortcuts
+
+The adversarially balanced dataset controls for two main confounds:
+
+<CardGroup cols={2}>
+  <Card title="Number Presence" icon="1">
+    **Original**: Numbers correlated with tool-call
+    
+    **Balanced**: 59.9% tool / 59.4% no-tool contain numbers
+    
+    **Eliminates**: "numbers → tool" shortcut
+  </Card>
+  <Card title="Dynamic-Cue Words" icon="clock">
+    **Original**: Words like "current", "today", "latest" correlated with tool-call
+    
+    **Balanced**: 34.3% tool / 29.4% no-tool contain cues
+    
+    **Eliminates**: "temporal keyword → tool" shortcut
+  </Card>
+</CardGroup>
+
+### The 2×2 Design
+
+Each confound cell is populated from dedicated template pools:
+
+```yaml Confound Matrix
+Tool + Numbers:
+  - "Calculate 847 * 293"
+  - "Convert 72 Fahrenheit to Celsius"
+  - "What day is March 15, 2025?"
+
+Tool + No Numbers:
+  - "What is the weather in Tokyo?"
+  - "What is AAPL trading at?"
+  - "Did the Lakers win?"
+
+No-Tool + Numbers:
+  - "World War 2 ended in 1945. Why was it significant?"
+  - "There are 7 continents. What does this tell us?"
+  - "Mount Everest is 8849 meters tall. How was this measured?"
+
+No-Tool + No Numbers:
+  - "What is photosynthesis?"
+  - "Explain the concept of a derivative."
+  - "What does P/E ratio mean?"
+```
+
+<Tip>
+The balance is enforced **at generation time** by drawing from confound-specific template pools in controlled proportions (see `generate_dataset()` in `synthetic_generator.py:902-1047`), not by post-hoc filtering.
+</Tip>
+
+## Impact on Findings: The L6H4 Example
+
+The L6H4 case study demonstrates the dramatic impact of confound balancing:
+
+<Tabs>
+  <Tab title="Original Dataset">
+    **Patching score**: 4.28 (dominant head)
+    
+    **Attention pattern**: Strong attention to numeric tokens
+    
+    **Interpretation**: "L6H4 is the tool decision head"
+    
+    **Reality**: L6H4 was detecting numbers as a proxy for tool-need
+  </Tab>
+  <Tab title="Balanced Dataset">
+    **Patching score**: ~0 (rank outside top 15)
+    
+    **Attention pattern**: Generic context tokens, minimal number attention
+    
+    **Interpretation**: L6H4 is largely irrelevant when numbers don't predict the label
+    
+    **Reality**: The "clean circuit" was a confound artifact
+  </Tab>
+</Tabs>
+
+### What Replaced L6H4?
+
+Instead of a single dominant head, the balanced dataset revealed:
+
+<Steps>
+  <Step title="Distributed importance">
+    Top three heads (L7H6, L2H1, L6H2) are within 8% of each other — no single head dominates
+  </Step>
+  <Step title="Broader layer coverage">
+    Importance spread across layers 2, 4, 5, 6, 7, 9, 10, and 11 (vs. concentrated in L6 originally)
+  </Step>
+  <Step title="Early-layer emergence">
+    L2H1 (early layer) now contributes meaningfully, suggesting early feature extraction is critical
+  </Step>
+  <Step title="Redundant computation">
+    15-head circuit is non-sufficient (50% accuracy alone) and near-non-necessary (100% without it)
+  </Step>
+</Steps>
+
+From RESULTS.md:259:
+
+<Info>
+Compared to the original dataset (where L6H4 scored 4.28, roughly 3× higher than any other head), the confound-balanced dataset produces a much flatter importance distribution. The top three heads are within 8% of each other, and none exceeds a score of 0.61. **There is no single "tool decision head."**
+</Info>
+
+## Adversarial Probing Results
+
+To test whether the model truly learned tool-need reasoning vs. refined shortcuts, we tested 50 adversarial examples designed to break surface-level strategies:
+
+| Category | Description | Accuracy |
+|----------|-------------|----------|
+| **Numbers, no tool needed** | *"What year was the Eiffel Tower built?"* | **73.3%** (11/15) |
+| **No number keywords, tool needed** | *"What's the weather right now in Austin?"* | **100%** (15/15) |
+| **Computation-adjacent, no tool** | *"What does it mean to calculate a derivative?"* | **100%** (10/10) |
+
+<Warning>
+The model perfectly handles "tool-needed without numbers" (15/15) and "computation-adjacent definitional" (10/10), making pure keyword matching unlikely.
+
+However, "numbers, no tool needed" drops to **73.3%**. The failures include:
+- *"In what year did World War 2 end?"* → predicted tool_call
+- *"What is the boiling point of water in Fahrenheit?"* → predicted tool_call  
+- *"How many paintings did Van Gogh create?"* → predicted tool_call
+</Warning>
+
+### Interpretation
+
+From RESULTS.md:385-388:
+
+<Info>
+These failures are revealing: all involve **quantities that could plausibly require lookup** (temperature values, counts of artworks). The model appears to reason at a coarser granularity — "question about a specific number" triggers tool-call even when the answer is common knowledge. This is a genuine limitation of the model's learned concept of "tool-need."
+</Info>
+
+## The Broader Lesson
+
+From RESULTS.md:473-475:
+
+<Warning>
+The adversarial balancing reveals a tension in mechanistic interpretability: **the circuits we find depend on the confounds we allow.** 
+
+A clean, localized circuit (L6H4-dominated) emerged when surface features correlated with the label. Removing those correlations didn't destroy the model's ability to learn the task (99.5% accuracy), but it did destroy the clean circuit.
+</Warning>
+
+The resulting mechanism is:
+- **Distributed** rather than localized
+- **Redundant** rather than minimal  
+- **Harder to characterize** than the original circuit
+- **Arguably more representative** of how real-world models process complex decisions
+
+## Implications for Interpretability Research
+
+<CardGroup cols={2}>
+  <Card title="Lesson 1" icon="triangle-exclamation">
+    **Surface features can masquerade as reasoning**
+    
+    Always test whether identified circuits survive adversarial confound balancing
+  </Card>
+  <Card title="Lesson 2" icon="flask">
+    **Correlation ≠ Causation in features**
+    
+    Features with enormous effect sizes (d > 19) can be causally inert — always validate with interventions
+  </Card>
+  <Card title="Lesson 3" icon="network-wired">
+    **Real tasks may be distributed**
+    
+    Not all behaviors localize to small head subsets — expect redundancy for robust, confound-free tasks
+  </Card>
+  <Card title="Lesson 4" icon="magnifying-glass-chart">
+    **Dataset design is interpretability design**
+    
+    The circuits you find reflect the task you actually created, not necessarily the task you intended
+  </Card>
+</CardGroup>
+
+## Source Code Reference
+
+Confound balancing implementation:
+```
+~/workspace/source/data/synthetic_generator.py
+```
+
+Key functions:
+- `generate_dataset()` (line 902): Enforces confound balance at generation time
+- `validate_dataset()` (line 1050): Audits confound balance statistics
+- `_has_number()` (line 91): Number detection heuristic
+- `_has_dynamic_cue()` (line 96): Dynamic-cue word detection
+
+Validation results from `validate_dataset()` (RESULTS.md:183-185):
+
+```yaml Confound Balance Audit
+Numbers present:
+  tool_call: 59.9%
+  no_tool: 59.4%
+  
+Dynamic-cue words present:
+  tool_call: 34.3%
+  no_tool: 29.4%
+```

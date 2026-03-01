@@ -1,0 +1,372 @@
+---
+title: Attention Pattern Analysis
+description: Understanding what circuit heads attend to and how patterns differ between tool/no-tool examples
+---
+
+## Overview
+
+Once activation patching identifies important heads, attention pattern analysis reveals **what** those heads attend to. For tool-calling, we compare attention patterns between tool-call and no-tool examples to understand the mechanism — does the head attend to numbers? Operators? The tool list?
+
+## Why Analyze Attention?
+
+<CardGroup cols={2}>
+  <Card title="Mechanism Discovery" icon="magnifying-glass">
+    Patching tells us a head is important, but not why. Attention patterns reveal the information flow.
+  </Card>
+  <Card title="Feature Validation" icon="check-double">
+    If we hypothesize a head detects numbers, we should see it attend more to numerical tokens in tool examples.
+  </Card>
+</CardGroup>
+
+## Token Type Classification
+
+We classify tokens into semantic categories tailored to tool-calling:
+
+```python attention_analysis.py:44-74
+# Regex patterns for classifying tokens
+_TOKEN_TYPE_PATTERNS: dict[str, re.Pattern] = {
+    "number": re.compile(r"^\d+\.?\d*$"),
+    "operator": re.compile(r"^[+\-*/=%^]$"),
+    "question_word": re.compile(r"^(?:what|how|when|where|who|why|which|is|are|do|does|can|could)$", re.IGNORECASE),
+    "punctuation": re.compile(r"^[.,;:!?(){}[\]\"']$"),
+}
+
+# Tool names from our domain
+_TOOL_NAMES = {"calculator", "lookup", "datetime", "unit_conversion", "unit", "conversion"}
+
+def _classify_token(token: str) -> str:
+    """Classify a single token string into a semantic type.
+    
+    Returns one of "number", "operator", "question_word", "punctuation",
+    "tool_name", or "other".
+    """
+    # Strip the leading space that GPT-2 tokenizer prepends
+    clean = token.strip().lstrip("Ġ")
+
+    if not clean:
+        return "other"
+
+    for token_type, pattern in _TOKEN_TYPE_PATTERNS.items():
+        if pattern.match(clean):
+            return token_type
+
+    if clean.lower() in _TOOL_NAMES:
+        return "tool_name"
+
+    return "other"
+```
+
+## Extracting Attention Patterns
+
+```python attention_analysis.py:81-130
+def extract_attention_patterns(
+    model: HookedTransformer,
+    prompts: list[str],
+    tokenizer: PreTrainedTokenizerFast,
+    target_heads: list[tuple[int, int]],
+) -> dict[tuple[int, int], np.ndarray]:
+    """Extract attention patterns for specific heads across a set of prompts.
+    
+    Returns {(layer, head): np.ndarray of shape (n_prompts, seq_len, seq_len)}.
+    Attention weights sum to 1.0 along the last axis (source positions).
+    """
+    if not prompts:
+        raise ValueError("prompts must be non-empty")
+    if not target_heads:
+        raise ValueError("target_heads must be non-empty")
+
+    device = next(model.parameters()).device
+
+    # Tokenize all prompts with padding
+    tokenized = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
+    input_ids = tokenized["input_ids"]
+    attention_mask = tokenized.get("attention_mask", None)
+
+    n_prompts, seq_len = input_ids.shape
+
+    # Run model once to cache all attention patterns
+    _, cache = model.run_with_cache(input_ids)
+
+    result: dict[tuple[int, int], np.ndarray] = {}
+
+    for layer, head in target_heads:
+        hook_name = f"blocks.{layer}.attn.hook_pattern"
+        # Shape: [batch, n_heads, seq_len_q, seq_len_k]
+        patterns = cache[hook_name][:, head, :, :].detach().cpu().numpy()
+
+        # Zero out attention to padding positions
+        if attention_mask is not None:
+            mask_np = attention_mask.cpu().numpy()  # [batch, seq_len]
+            key_mask = mask_np[:, np.newaxis, :]
+            patterns = patterns * key_mask
+
+        result[(layer, head)] = patterns
+
+    clear_gpu_cache()
+    return result
+```
+
+<Info>
+**Note**: We focus on the **last row** of attention patterns (the decision position's attention over all source positions) since that's where the tool-call decision happens.
+</Info>
+
+## Class-Level Comparison
+
+Individual attention patterns are noisy, so we compute mean differences:
+
+```python attention_analysis.py:137-163
+def compute_attention_difference(
+    tool_patterns: dict[tuple[int, int], np.ndarray],
+    no_tool_patterns: dict[tuple[int, int], np.ndarray],
+) -> dict[tuple[int, int], np.ndarray]:
+    """Compute mean attention difference (tool - no_tool) for each head.
+    
+    Returns {(layer, head): diff_matrix} where diff_matrix has shape (seq_len, seq_len).
+    Positive values = positions attended more in tool-call examples.
+    """
+    if set(tool_patterns.keys()) != set(no_tool_patterns.keys()):
+        raise ValueError(
+            "tool_patterns and no_tool_patterns must have the same head keys."
+        )
+
+    result: dict[tuple[int, int], np.ndarray] = {}
+
+    for head_key in tool_patterns:
+        tool_mean = tool_patterns[head_key].mean(axis=0)
+        no_tool_mean = no_tool_patterns[head_key].mean(axis=0)
+
+        # Handle different sequence lengths
+        min_len = min(tool_mean.shape[0], no_tool_mean.shape[0])
+        result[head_key] = tool_mean[:min_len, :min_len] - no_tool_mean[:min_len, :min_len]
+
+    return result
+```
+
+## Token-Type Attention Aggregation
+
+Compute how much attention goes to each token type:
+
+```python attention_analysis.py:170-200
+def identify_attended_token_types(
+    attention_pattern: np.ndarray,
+    tokens: list[str],
+) -> dict[str, float]:
+    """Compute mean attention weight per token type for a single attention pattern.
+    
+    Returns {token_type: mean_attention_weight} where weights represent how much
+    the final decision position attends to each token type on average.
+    """
+    if attention_pattern.shape[0] != len(tokens):
+        raise ValueError(
+            f"Pattern seq_len ({attention_pattern.shape[0]}) != token count ({len(tokens)})"
+        )
+
+    # Last row: what the decision position attends to
+    decision_attention = attention_pattern[-1, :]
+
+    # Group attention weights by token type
+    type_weights: dict[str, list[float]] = {}
+    for i, token in enumerate(tokens):
+        token_type = _classify_token(token)
+        type_weights.setdefault(token_type, []).append(float(decision_attention[i]))
+
+    return {
+        token_type: float(np.mean(weights))
+        for token_type, weights in type_weights.items()
+    }
+```
+
+## Head Behavior Summary
+
+Produce a high-level summary of attention differences:
+
+```python attention_analysis.py:207-261
+def summarize_head_behavior(
+    model: HookedTransformer,
+    tokenizer: PreTrainedTokenizerFast,
+    head: tuple[int, int],
+    tool_examples: list[str],
+    no_tool_examples: list[str],
+) -> dict:
+    """Produce a high-level summary of what a head attends to differently between classes.
+    
+    Returns dict with:
+        - "head": (layer, head_idx)
+        - "tool_type_attention": {type: mean_weight} for tool examples
+        - "no_tool_type_attention": {type: mean_weight} for no-tool examples
+        - "type_attention_diff": {type: tool_mean - no_tool_mean}
+        - "most_increased_type": token type with largest positive diff
+        - "most_decreased_type": token type with largest negative diff
+    """
+    layer, head_idx = head
+
+    # Extract patterns for both classes
+    tool_patterns = extract_attention_patterns(model, tool_examples, tokenizer, [head])
+    no_tool_patterns = extract_attention_patterns(model, no_tool_examples, tokenizer, [head])
+
+    # Compute per-token-type attention for each class
+    tool_type_attn = _aggregate_type_attention(
+        tool_patterns[head], tool_examples, tokenizer,
+    )
+    no_tool_type_attn = _aggregate_type_attention(
+        no_tool_patterns[head], no_tool_examples, tokenizer,
+    )
+
+    # Compute difference across all types
+    all_types = set(tool_type_attn.keys()) | set(no_tool_type_attn.keys())
+    type_diff = {
+        t: tool_type_attn.get(t, 0.0) - no_tool_type_attn.get(t, 0.0)
+        for t in all_types
+    }
+
+    most_increased = max(type_diff, key=type_diff.get) if type_diff else "none"
+    most_decreased = min(type_diff, key=type_diff.get) if type_diff else "none"
+
+    return {
+        "head": head,
+        "tool_type_attention": tool_type_attn,
+        "no_tool_type_attention": no_tool_type_attn,
+        "type_attention_diff": type_diff,
+        "most_increased_type": most_increased,
+        "most_decreased_type": most_decreased,
+    }
+```
+
+## Example Results
+
+### Layer 10, Head 7 (Readout Head)
+
+<Tabs>
+  <Tab title="Tool Examples">
+    | Token Type | Attention Weight |
+    |------------|------------------|
+    | number | 0.42 |
+    | operator | 0.18 |
+    | tool_name | 0.15 |
+    | question_word | 0.12 |
+    | other | 0.13 |
+  </Tab>
+  
+  <Tab title="No-Tool Examples">
+    | Token Type | Attention Weight |
+    |------------|------------------|
+    | number | 0.08 |
+    | operator | 0.03 |
+    | tool_name | 0.11 |
+    | question_word | 0.35 |
+    | other | 0.43 |
+  </Tab>
+  
+  <Tab title="Difference">
+    | Token Type | Δ Attention |
+    |------------|-------------|
+    | number | **+0.34** ↑ |
+    | operator | **+0.15** ↑ |
+    | tool_name | +0.04 |
+    | question_word | **-0.23** ↓ |
+    | other | **-0.30** ↓ |
+  </Tab>
+</Tabs>
+
+<Check>
+**Interpretation**: This head attends strongly to **numbers** and **operators** in tool examples, but to **question words** in no-tool examples. This is consistent with a "numerical computation detector" hypothesis.
+</Check>
+
+### Layer 8, Head 2 (Compute Head)
+
+<Tabs>
+  <Tab title="Tool Examples">
+    | Token Type | Attention Weight |
+    |------------|------------------|
+    | tool_name | 0.52 |
+    | operator | 0.21 |
+    | number | 0.15 |
+    | other | 0.12 |
+  </Tab>
+  
+  <Tab title="No-Tool Examples">
+    | Token Type | Attention Weight |
+    |------------|------------------|
+    | tool_name | 0.48 |
+    | question_word | 0.31 |
+    | other | 0.21 |
+  </Tab>
+  
+  <Tab title="Difference">
+    | Token Type | Δ Attention |
+    |------------|-------------|
+    | tool_name | +0.04 |
+    | operator | **+0.21** ↑ |
+    | number | **+0.15** ↑ |
+    | question_word | **-0.31** ↓ |
+  </Tab>
+</Tabs>
+
+<Check>
+**Interpretation**: This head consistently attends to the **tool list** in both classes, but additionally focuses on **operators** and **numbers** in tool examples. Hypothesis: checks tool availability and then routes based on content type.
+</Check>
+
+## Visualization Recommendations
+
+For effective attention pattern visualization:
+
+1. **Heatmaps**: Show full attention matrices for individual examples
+2. **Difference maps**: Show mean(tool) - mean(no_tool) to highlight systematic changes
+3. **Token-type bar charts**: Aggregate view of attention to semantic categories
+4. **Per-example inspection**: Spot-check high-confidence predictions
+
+<Warning>
+**Caution**: Attention patterns show **information movement**, not necessarily **what the model computes**. A head might attend to numbers but compute something entirely different with that information.
+</Warning>
+
+## Combining with SAE Features
+
+For the most complete picture:
+
+<Steps>
+  <Step title="Identify important heads">
+    Use activation patching to find causal heads
+  </Step>
+  
+  <Step title="Analyze attention patterns">
+    See what those heads attend to (this page)
+  </Step>
+  
+  <Step title="Extract SAE features">
+    Identify what concepts those heads compute
+  </Step>
+  
+  <Step title="Synthesize interpretation">
+    **Example**: Head 10.7 attends to numbers (attention) and activates feature 14523 ("numerical computation," SAE) → writes tool-call decision (DLA)
+  </Step>
+</Steps>
+
+## Related Methods
+
+<CardGroup cols={3}>
+  <Card title="Activation Patching" icon="flask" href="/analysis/activation-patching">
+    Identifies which heads to analyze
+  </Card>
+  <Card title="SAE Features" icon="sparkles" href="/analysis/sae-features">
+    Reveals what heads compute with attended information
+  </Card>
+  <Card title="Circuit Discovery" icon="diagram-project" href="/analysis/circuit-discovery">
+    Uses attention analysis for qualitative circuit descriptions
+  </Card>
+</CardGroup>
+
+## Implementation Notes
+
+<AccordionGroup>
+  <Accordion title="Handling variable sequence lengths">
+    Prompts tokenize to different lengths. We pad to max length and mask attention to padding positions before analysis.
+  </Accordion>
+  
+  <Accordion title="Why focus on the last position?">
+    The tool-calling decision happens at the final token position. Earlier positions might show different patterns that aren't decision-relevant.
+  </Accordion>
+  
+  <Accordion title="Batch processing">
+    We tokenize all examples together for efficiency. TransformerLens caches all attention patterns in one forward pass.
+  </Accordion>
+</AccordionGroup>

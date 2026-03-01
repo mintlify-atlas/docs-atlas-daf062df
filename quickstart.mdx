@@ -1,80 +1,255 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get the tool-calling interpretability pipeline running in minutes
 ---
 
-## Get started in three steps
+# Quickstart Guide
 
-Get your documentation site running locally and make your first customization.
+Get up and running with the tool-calling mechanistic interpretability pipeline in under 10 minutes.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+- Python 3.8+
+- CUDA-capable GPU recommended (RTX 3060 12GB or equivalent)
+- CPU-only execution supported (slower)
+
+## Installation
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone <your-repo-url>
+    cd tool-call-mech-interp
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+    This installs:
+    - PyTorch ≥2.1.0
+    - TransformerLens ≥1.14.0 (for mechanistic interpretability)
+    - SAE Lens ≥3.0.0 (for sparse autoencoder analysis)
+    - Transformers ≥4.35.0 (for GPT-2 fine-tuning)
+    - Visualization tools (plotly, kaleido)
+  </Step>
+
+  <Step title="Verify installation">
+    ```bash
+    python -c "import torch; import transformer_lens; print('Setup OK')"
+    ```
+  </Step>
+</Steps>
+
+## Run the Full Pipeline
+
+The pipeline runs all phases sequentially: data generation, fine-tuning, interpretability analysis, and visualization.
+
+```bash
+python run_pipeline.py
+```
+
+<Info>
+**Runtime**: ~5 minutes on RTX 3060 12GB, ~15-20 minutes on CPU
+</Info>
+
+### What This Does
+
+<Steps>
+  <Step title="Phase 1-2: Data Generation">
+    Generates 10,000 adversarially-balanced examples:
+    - 5,000 tool-call prompts (requiring calculator/lookup/datetime/unit_conversion)
+    - 5,000 no-tool prompts (conceptual questions, definitions)
+    - Balanced for confounds: numbers present 59.9% vs 59.4%, temporal keywords 34.3% vs 29.4%
+    - Saves to `results/data/dataset.json`
+  </Step>
+
+  <Step title="Phase 3: Fine-Tuning">
+    Trains GPT-2 Small to predict `<|tool_call|>` or `<|no_tool|>` tokens:
+    - 3 epochs with early stopping (typically stops at epoch 2)
+    - Batch size 4, gradient accumulation 4 (effective batch 16)
+    - Mixed precision (fp16), gradient checkpointing
+    - Target: >99% test accuracy
+    - Saves checkpoint to `checkpoints/best/`
+  </Step>
+
+  <Step title="Phase 4-6: Interpretability Analysis">
+    Runs four complementary analyses:
+    1. **Activation Patching**: Identifies causally important heads (50 minimal pairs)
+    2. **Direct Logit Attribution (DLA)**: Measures direct contribution to decision logit
+    3. **SAE Feature Analysis**: Ranks sparse autoencoder features by Cohen's d
+    4. **Circuit Synthesis**: Combines rankings, validates with ablation experiments
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    Saves results to `results/full_results.json`
+  </Step>
 
-### Step 2: Deploy your changes
+  <Step title="Phase 7: Visualization">
+    Generates heatmaps and feature plots:
+    - `results/figures/patching_heatmap.png`
+    - `results/figures/dla_heatmap.png`
+    - `results/figures/combined_importance.png`
+    - `results/figures/sae_feature_ranking.png`
+  </Step>
+</Steps>
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+## Analysis-Only Mode
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+If you already have a trained checkpoint, skip to analysis:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+```bash
+python run_pipeline.py --phase analysis
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+Requires `checkpoints/best/` to exist from a previous training run
 </Note>
+
+### Headless/Server Mode
+
+Skip visualization when running on a server without display:
+
+```bash
+python run_pipeline.py --phase analysis --skip-visualization
+```
+
+## Run Follow-Up Experiments
+
+After the main pipeline completes, run additional analyses:
+
+<CodeGroup>
+```bash Deep Analysis
+python scripts/deep_analysis.py
+```
+
+```bash Training Dynamics
+python scripts/training_dynamics.py
+```
+
+```bash Causal Controls
+python scripts/causal_positive_control.py
+```
+
+```bash Seed Robustness
+python scripts/patching_seed_robustness.py
+```
+</CodeGroup>
+
+### What These Scripts Do
+
+| Script | Purpose | Output |
+|--------|---------|--------|
+| `deep_analysis.py` | Attention patterns, adversarial probing, per-tool-type circuits, SAE causal patching | `results/deep_analysis_results.json` |
+| `training_dynamics.py` | Tracks circuit emergence during training (retrain from scratch) | `results/training_dynamics.json` |
+| `causal_positive_control.py` | Validates intervention machinery with known-causal ablations | `results/causal_positive_control.json` |
+| `patching_seed_robustness.py` | Tests ranking stability across random seeds | `results/patching_seed_robustness.json` |
+
+## Expected Outputs
+
+### Console Output
+
+You should see logging like:
+
+```
+[2026-03-01 10:23:45] INFO - Starting pipeline from phase 'data'
+[2026-03-01 10:23:48] INFO - Generated 10000 examples, validation passed
+[2026-03-01 10:23:48] INFO - Confound balance: {'numbers': 0.005, 'temporal': 0.049}
+[2026-03-01 10:26:12] INFO - Test accuracy: 0.9950 (tool=1.0000, no_tool=0.9898)
+[2026-03-01 10:28:34] INFO - Patching complete. Top head: L7H6 (score=0.6058)
+[2026-03-01 10:29:01] INFO - DLA complete. Top head: L11H8 (score=13.4812)
+[2026-03-01 10:31:22] INFO - Proposed circuit: 15 heads
+[2026-03-01 10:31:45] INFO - Sufficiency accuracy: 0.5000 | Necessity accuracy: 1.0000
+[2026-03-01 10:32:10] INFO - Pipeline complete in 518.3 seconds
+```
+
+### Key Results Files
+
+<CodeGroup>
+```json Full Results
+{
+  "patching_scores": [[...]],  // 12×12 array (layers × heads)
+  "dla_scores": [[...]],
+  "circuit_heads": [[2, 1], [6, 2], [7, 6], ...],  // 15 (layer, head) pairs
+  "ablation": {
+    "sufficiency": {"accuracy": 0.50},
+    "necessity": {"accuracy": 1.00}
+  },
+  "top_sae_features": [
+    {"feature_id": 3633, "cohen_d": -19.38, "tool_mean": 0.0, "no_tool_mean": 11.41},
+    ...
+  ]
+}
+```
+
+```json Training Dynamics
+{
+  "checkpoints": [
+    {"step": 0, "epoch": 0, "accuracy": 0.40, "max_patching_score": 0.000},
+    {"step": 300, "epoch": 1, "accuracy": 0.96, "max_patching_score": 0.384},
+    {"step": 1000, "epoch": 2, "accuracy": 1.00, "max_patching_score": 5.862}
+  ]
+}
+```
+</CodeGroup>
+
+## Run Tests
+
+Validate the setup with regression tests:
+
+```bash
+pytest -q
+```
+
+Tests cover:
+- Dataset confound balancing
+- Prompt formatting (unlabeled decision prompts)
+- Activation patching input validation
+- SAE feature extraction
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Out of memory during fine-tuning">
+    Reduce batch size in `configs/experiment_config.py`:
+    ```python
+    batch_size: int = 2  # down from 4
+    gradient_accumulation_steps: int = 8  # up from 4 to keep effective batch=16
+    ```
+  </Accordion>
+
+  <Accordion title="SAE analysis fails with download error">
+    SAEs are loaded from HuggingFace Hub. If offline or behind firewall:
+    ```bash
+    # Pre-download SAEs
+    huggingface-cli download jbloom/GPT2-Small-SAEs-Reformatted
+    ```
+    
+    The pipeline will log a warning and skip SAE analysis (non-fatal).
+  </Accordion>
+
+  <Accordion title="Visualization hangs in headless environment">
+    Use `--skip-visualization` flag:
+    ```bash
+    python run_pipeline.py --skip-visualization
+    ```
+  </Accordion>
+
+  <Accordion title="Low test accuracy (less than 95%)">
+    Pipeline logs a warning if accuracy is below 85%. Possible causes:
+    - Insufficient training epochs (increase in config)
+    - Random seed variance (try re-running)
+    - Hardware differences (fp16 rounding on different GPUs)
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deep Dive: Installation" icon="wrench" href="/installation">
+    Hardware requirements, dependency details, advanced setup
+  </Card>
+  <Card title="Read Results" icon="book" href="https://github.com/your-repo/RESULTS.md">
+    Full experimental narrative with findings and limitations
+  </Card>
+</CardGroup>

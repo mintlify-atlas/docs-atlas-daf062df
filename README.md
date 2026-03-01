@@ -1,28 +1,16 @@
-# Mintlify Starter Kit
+# Tool-Call Mechanistic Interpretability Documentation
 
-Use the starter kit to get your docs deployed and ready to customize.
+This is the documentation site for the tool-call mechanistic interpretability research project.
 
-Click the green **Use this template** button at the top of this repo to copy the Mintlify starter kit. The starter kit contains examples with
+The project investigates how GPT-2 models decide when to call tools versus answer directly using mechanistic interpretability techniques including activation patching, direct logit attribution (DLA), and sparse autoencoder (SAE) feature analysis.
 
-- Guide pages
-- Navigation
-- Customizations
-- API reference pages
-- Use of popular components
+## Key Features
 
-**[Follow the full quickstart guide](https://starter.mintlify.com/quickstart)**
-
-## AI-assisted writing
-
-Set up your AI coding tool to work with Mintlify:
-
-```bash
-npx skills add https://mintlify.com/docs
-```
-
-This command installs Mintlify's documentation skill for your configured AI tools like Claude Code, Cursor, Windsurf, and others. The skill includes component reference, writing standards, and workflow guidance.
-
-See the [AI tools guides](/ai-tools) for tool-specific setup.
+- Adversarially balanced dataset generation
+- GPT-2 fine-tuning on tool-calling decisions
+- Activation patching for causal head importance
+- Circuit discovery and ablation studies
+- Comprehensive analysis pipeline
 
 ## Development
 

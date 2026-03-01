@@ -1,0 +1,417 @@
+---
+title: Data Generation
+description: How the confound-balanced synthetic dataset is created
+---
+
+The dataset generator creates 10,000 adversarially balanced examples where surface features (numbers, dynamic-cue words) are orthogonal to the label. This eliminates shortcut strategies and forces the model to learn genuine tool-need reasoning.
+
+## Design Philosophy
+
+<Info>
+The ONLY reliable signal is whether the question requires **executing a computation** or **fetching real-time data** (tool_call) vs answering from **static knowledge** (no_tool).
+</Info>
+
+Two main shortcuts are eliminated:
+
+1. **"Numbers present → tool_call"** — Numbers appear equally in both classes
+2. **"Dynamic cue word present → tool_call"** — Words like "current", "today", "latest" appear equally in both classes
+
+## Confound Balance Design
+
+The dataset follows a 2×2 confound design:
+
+<CardGroup cols={2}>
+  <Card title="Tool + Numbers" icon="calculator">
+    ~60% of tool-call examples
+    
+    - Arithmetic: "Calculate 847 * 293."
+    - Datetime: "How many days between Jan 1 and Mar 15?"
+    - Unit conversion: "Convert 72°F to Celsius."
+  </Card>
+  
+  <Card title="Tool + No Numbers" icon="cloud">
+    ~40% of tool-call examples
+    
+    - Weather: "What is the weather in Tokyo?"
+    - Stocks: "What is AAPL trading at?"
+    - Sports: "Did the Lakers win?"
+  </Card>
+  
+  <Card title="No-Tool + Numbers" icon="book">
+    ~60% of no-tool examples
+    
+    - Historical: "The Eiffel Tower was built in 1889. Why?"
+    - Constants: "Water boils at 100°C. Explain why."
+    - Static facts: "How many bones are in the human body?"
+  </Card>
+  
+  <Card title="No-Tool + No Numbers" icon="lightbulb">
+    ~40% of no-tool examples
+    
+    - Definitions: "What is photosynthesis?"
+    - Concepts: "Explain the concept of gravity."
+    - Entity facts: "What sport do the Yankees play?"
+  </Card>
+</CardGroup>
+
+### Achieved Balance
+
+From `RESULTS.md` validation stats:
+
+| Feature | Tool-call % | No-tool % | Δ |
+|---------|-------------|-----------|----|
+| Numbers present | 59.9% | 59.4% | **0.5%** |
+| Dynamic-cue words | 34.3% | 29.4% | **4.9%** |
+
+The residual asymmetry is small enough that surface shortcuts cannot achieve 99.5% accuracy.
+
+## Implementation Architecture
+
+From `data/synthetic_generator.py`:
+
+```python
+def generate_dataset(
+    n: int = CONFIG.data.n_examples,
+    seed: int = CONFIG.data.seed,
+) -> list[ToolExample]:
+    """Generate an adversarially balanced dataset.
+    
+    Post: returned list has exactly n examples with:
+      - 50/50 label split
+      - numbers appear ~equally in both classes
+      - dynamic-cue words appear ~equally in both classes
+      - includes minimal-pair counterfactuals
+    """
+```
+
+### Data Structure
+
+Each example is a `ToolExample` dataclass:
+
+```python
+@dataclass(frozen=True)
+class ToolExample:
+    prompt: str              # Raw user question
+    label: str               # "tool_call" or "no_tool"
+    tool_type: str | None    # calculator/lookup/datetime/unit_conversion
+    formatted: str           # Full training string with decision token
+```
+
+Example formatted training string:
+
+```
+User: What is 847 * 293?
+Available tools: [calculator, lookup, datetime, unit_conversion]
+Assistant: <|tool_call|>
+```
+
+## Template Pools
+
+The generator uses large template pools (30+ templates per category) to create diversity:
+
+### Calculator Templates (with numbers)
+
+From `synthetic_generator.py` (lines 180-211):
+
+```python
+_CALC_TOOL_TEMPLATES = [
+    "What is {a} {op_word} {b}?",
+    "Calculate {a} {op_sym} {b}.",
+    "Can you compute {a} {op_sym} {b}?",
+    "Find the result of {a} {op_sym} {b}.",
+    "What is {a} raised to the power of {exp}?",
+    "Calculate the square root of {a}.",
+    "What is {a} mod {b}?",
+    "What is {a} percent of {b}?",
+    "What is the average of {a}, {b}, and {c}?",
+    # ... 30 total templates
+]
+
+def _gen_calc_tool(rng: random.Random) -> str:
+    op_sym, op_word = rng.choice(_OPS)
+    a, b = rng.randint(2, 9999), rng.randint(2, 9999)
+    c, exp = rng.randint(2, 500), rng.randint(2, 6)
+    price = round(rng.uniform(0.50, 99.99), 2)
+    return rng.choice(_CALC_TOOL_TEMPLATES).format(
+        a=a, b=b, c=c, exp=exp, price=price, op_sym=op_sym, op_word=op_word,
+    )
+```
+
+### Lookup Templates (no numbers)
+
+From `synthetic_generator.py` (lines 326-383):
+
+```python
+_LOOKUP_NO_NUMBERS_TEMPLATES = [
+    # Weather
+    "What is the weather in {city}?",
+    "What is the forecast for {city}?",
+    "Is it raining in {city}?",
+    # Stocks
+    "What is {ticker} trading at?",
+    "What is the share price of {ticker}?",
+    "How is {ticker} performing?",
+    # Sports
+    "Who won the {team} game?",
+    "Did the {team} win?",
+    # Currency rates
+    "What is the exchange rate from {curr1} to {curr2}?",
+    # ... 80+ total templates
+]
+```
+
+### Historical Fact Templates (numbers + no-tool)
+
+From `synthetic_generator.py` (lines 427-531):
+
+```python
+_HISTORICAL_EVENTS = [
+    "The Eiffel Tower was completed in 1889",
+    "World War 2 ended in 1945",
+    "The Berlin Wall fell in 1989",
+    "The first iPhone was released in 2007",
+    "Neil Armstrong walked on the Moon in 1969",
+    # ... 80+ events with dates
+]
+
+_HISTORICAL_QUESTION_TEMPLATES = [
+    "{event}. What was its significance?",
+    "{event}. Why does this matter historically?",
+    "{event}. What led to this event?",
+    "{event}. What were the consequences?",
+    # ... 20 templates
+]
+```
+
+## Minimal-Pair Counterfactuals
+
+The dataset includes 30 minimal pairs — near-identical prompts differing only in execution requirement:
+
+```python
+_MINIMAL_PAIRS: list[tuple[str, str]] = [
+    # (tool_prompt, no_tool_prompt)
+    ("What is 847 * 293?", "What does multiplication mean?"),
+    ("Calculate 15% of 2340.", "What does 'percentage' mean in mathematics?"),
+    ("Convert 72°F to Celsius.", "Why do some countries use Fahrenheit?"),
+    ("What is the square root of 529?", "What does 'square root' mean?"),
+    
+    # Same numbers, different intent
+    ("What is 206 + 46?", "How many bones (206) and chromosomes (46) do humans have?"),
+    ("Calculate 3.14159 * 100.", "Pi is 3.14159. Why is it irrational?"),
+    
+    # Same dynamic cues, different intent
+    ("What is the current stock price of Tesla?", "What does 'current' mean in circuits?"),
+    ("What is the live score of the Lakers game?", "What does 'live' mean in broadcasting?"),
+    # ...
+]
+```
+
+These are the hardest test of whether the model learned the real decision boundary vs surface patterns.
+
+## Generation Process
+
+The generator enforces balance through controlled sampling, not post-hoc filtering:
+
+```python
+def generate_dataset(n: int = 10_000, seed: int = 42) -> list[ToolExample]:
+    rng = random.Random(seed)
+    half = n // 2
+    
+    # Allocation plan
+    n_pairs = min(len(_MINIMAL_PAIRS), half // 10)  # 10% minimal pairs
+    n_remaining_tool = half - n_pairs
+    n_remaining_no_tool = half - n_pairs
+    
+    # Tool-call: ~60% with numbers, ~40% without
+    n_tool_with_nums = int(n_remaining_tool * 0.60)
+    n_tool_no_nums = n_remaining_tool - n_tool_with_nums
+    
+    # No-tool: ~60% with numbers, ~40% without
+    n_notool_with_nums = int(n_remaining_no_tool * 0.60)
+    n_notool_no_nums = n_remaining_no_tool - n_notool_with_nums
+    
+    # Generate from specific template pools
+    _gen_n(_gen_calc_tool, n_calc, "tool_call", "calculator")
+    _gen_n(_gen_datetime_tool, n_datetime, "tool_call", "datetime")
+    _gen_n(_gen_lookup_no_numbers, n_lookup_plain, "tool_call", "lookup")
+    _gen_n(_gen_notool_with_numbers, n_notool_nums, "no_tool", None)
+    # ...
+    
+    # Shuffle to prevent systematic ordering
+    rng.shuffle(examples)
+    return examples
+```
+
+<Note>
+The generator uses **deterministic sampling** (fixed seed=42) for reproducibility. Running generation twice produces identical examples in identical order.
+</Note>
+
+## Validation
+
+The `validate_dataset` function enforces structural invariants:
+
+```python
+def validate_dataset(examples: list[ToolExample]) -> dict:
+    """Assert structural invariants and report confound balance.
+    
+    Checks:
+    - 50/50 label balance
+    - No duplicate prompts
+    - All formatted strings non-empty
+    
+    Returns: dict with confound balance stats for logging
+    Raises ValueError on any violation
+    """
+    n_tool = sum(1 for e in examples if e.label == "tool_call")
+    n_no_tool = sum(1 for e in examples if e.label == "no_tool")
+    if n_tool != n_no_tool:
+        raise ValueError(f"Label imbalance: {n_tool} tool vs {n_no_tool} no-tool")
+    
+    # Check for duplicates
+    prompts = [e.prompt for e in examples]
+    if len(prompts) != len(set(prompts)):
+        raise ValueError(f"Found {len(prompts) - len(set(prompts))} duplicates")
+    
+    # Confound balance audit
+    tool_has_nums = sum(1 for e in tool_examples if _has_number(e.prompt))
+    notool_has_nums = sum(1 for e in notool_examples if _has_number(e.prompt))
+    # ...
+```
+
+From the pipeline logs:
+
+```
+INFO: Generated 10000 examples, validation passed
+INFO: Confound balance: {'n_total': 10000, 'n_tool': 5000, 'n_no_tool': 5000, 
+                          'tool_pct_with_numbers': 59.9, 'notool_pct_with_numbers': 59.4, 
+                          'tool_pct_with_dynamic_cues': 34.3, 'notool_pct_with_dynamic_cues': 29.4}
+```
+
+## Dataset Statistics
+
+| Metric | Value |
+|--------|-------|
+| Total examples | 10,000 |
+| Tool-call examples | 5,000 (50.0%) |
+| No-tool examples | 5,000 (50.0%) |
+| Tool types | 4 (calculator, lookup, datetime, unit_conversion) |
+| Max sequence length | 256 tokens |
+| Unique prompts | 10,000 (no duplicates) |
+| Minimal pairs | 30 |
+
+### Split Ratios
+
+From `configs/experiment_config.py`:
+
+```python
+class DataConfig:
+    train_ratio: float = 0.80  # 8,000 examples
+    val_ratio: float = 0.10    # 1,000 examples
+    test_ratio: float = 0.10   # 1,000 examples
+```
+
+Splits are deterministic via `torch.Generator().manual_seed(seed)`.
+
+## Running Data Generation
+
+### Standalone Generation
+
+```python
+from data.synthetic_generator import generate_dataset, validate_dataset
+
+examples = generate_dataset(n=10_000, seed=42)
+stats = validate_dataset(examples)
+print(f"Generated {len(examples)} examples")
+print(f"Balance: {stats}")
+```
+
+### Via Pipeline
+
+```bash
+python run_pipeline.py --phase data
+```
+
+Output saved to `results/data/dataset.json`:
+
+```json
+[
+  {
+    "prompt": "What is 847 * 293?",
+    "label": "tool_call",
+    "tool_type": "calculator",
+    "formatted": "User: What is 847 * 293?\nAvailable tools: [...]\nAssistant: <|tool_call|>"
+  },
+  {
+    "prompt": "The Eiffel Tower was completed in 1889. What was its significance?",
+    "label": "no_tool",
+    "tool_type": null,
+    "formatted": "User: The Eiffel Tower was completed in 1889...\nAssistant: <|no_tool|>"
+  }
+]
+```
+
+## Customization
+
+To modify the dataset:
+
+<Steps>
+  <Step title="Add new templates">
+    Edit template lists in `data/synthetic_generator.py` (e.g., `_CALC_TOOL_TEMPLATES`)
+  </Step>
+  
+  <Step title="Adjust balance ratios">
+    Modify allocation logic in `generate_dataset()` (lines 936-950)
+  </Step>
+  
+  <Step title="Change dataset size">
+    Update `configs/experiment_config.py`:
+    ```python
+    class DataConfig:
+        n_examples: int = 20_000  # default: 10_000
+    ```
+  </Step>
+  
+  <Step title="Regenerate">
+    ```bash
+    python run_pipeline.py --phase data
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+Changing the seed or templates produces a completely different dataset. For reproducibility, maintain `seed=42` unless running ablations.
+</Warning>
+
+## Limitations
+
+<AccordionGroup>
+  <Accordion title="Template structure leakage">
+    All examples follow the same format:
+    ```
+    User: [question]
+    Available tools: [calculator, lookup, datetime, unit_conversion]
+    Assistant:
+    ```
+    
+    The model may learn template-specific patterns. The adversarial probing (90% on out-of-distribution examples) partially mitigates this but doesn't eliminate it.
+  </Accordion>
+  
+  <Accordion title="Approximate balance">
+    Perfect confound balance is impossible with finite template diversity. The achieved balance (numbers: 59.9% vs 59.4%, cues: 34.3% vs 29.4%) is close but not exact.
+  </Accordion>
+  
+  <Accordion title="Synthetic data only">
+    Real tool-calling involves multi-step reasoning, argument construction, and error handling. This dataset tests a single binary decision in isolation.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Fine-Tuning" icon="brain" href="/experiments/fine-tuning">
+    Learn how GPT-2 is trained on this dataset
+  </Card>
+  <Card title="Running Analysis" icon="chart-line" href="/experiments/running-analysis">
+    See how to analyze the trained model
+  </Card>
+</CardGroup>

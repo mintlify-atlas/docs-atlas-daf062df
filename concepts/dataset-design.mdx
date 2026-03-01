@@ -1,0 +1,226 @@
+---
+title: "Dataset Design"
+description: "The adversarially balanced dataset that eliminates surface-feature shortcuts"
+---
+
+## Binary Classification Task Structure
+
+The dataset is designed as a clean binary classification task:
+
+<CodeGroup>
+```text Input Format
+User: [question]
+Available tools: [calculator, lookup, datetime, unit_conversion]
+Assistant:
+```
+
+```text Output Tokens
+<|tool_call|>  or  <|no_tool|>
+```
+</CodeGroup>
+
+The decision boundary is clear and consistent:
+- Questions requiring **computation, dynamic data, or conversion** → `<|tool_call|>`
+- Questions requiring **conceptual knowledge or definitions** → `<|no_tool|>`
+
+<Info>
+Both prompt types include the same `Available tools: [...]` line, so the model can't shortcut by checking whether tools are mentioned — it must infer tool-need from question content.
+</Info>
+
+## The 2×2 Confound-Balanced Design
+
+The critical design innovation: the dataset is **adversarially balanced** to eliminate the two most obvious surface-feature shortcuts.
+
+| Confound | Tool-call examples | No-tool examples | Purpose |
+|---|---|---|---|
+| **Numbers present** | 59.9% | 59.4% | Prevents "numbers → tool" shortcut |
+| **Dynamic-cue words** ("current", "today", "latest") | 34.3% | 29.4% | Prevents "temporal keyword → tool" shortcut |
+
+This is achieved through a 2×2 design where each confound cell is populated from dedicated template pools:
+
+<CardGroup cols={2}>
+  <Card title="Tool + Numbers" icon="calculator">
+    Arithmetic, datetime math, unit conversions, numeric lookups
+    
+    *"Calculate 847 × 293"*
+  </Card>
+  <Card title="Tool + No Numbers" icon="cloud-sun">
+    Weather queries, stock lookups, time zone questions
+    
+    *"What is the weather in Tokyo?"*
+  </Card>
+  <Card title="No-Tool + Numbers" icon="book">
+    Historical facts with years, static counts, physical constants
+    
+    *"The Eiffel Tower was built in 1889. Why was it significant?"*
+  </Card>
+  <Card title="No-Tool + No Numbers" icon="graduation-cap">
+    Conceptual definitions, explanations
+    
+    *"What is photosynthesis?"*
+  </Card>
+</CardGroup>
+
+## Real Examples from the Dataset
+
+All examples below are taken directly from `~/workspace/source/data/synthetic_generator.py`:
+
+### Tool-Call Examples (with numbers)
+
+<CodeGroup>
+```python Calculator
+# From _CALC_TOOL_TEMPLATES
+"What is {a} {op_word} {b}?"
+"Calculate {a} {op_sym} {b}."
+"What is {a} percent of {b}?"
+"Divide {a} by {b} and round down."
+
+# Real generated example:
+"Calculate 9274 divided by 2952."
+```
+
+```python Datetime
+# From _DATETIME_TOOL_TEMPLATES  
+"What day of the week is {month} {day}, {year}?"
+"How many days are between {month} {day}, {year} and {month2} {day2}, {year2}?"
+"Calculate the age of someone born on {month} {day}, {year}."
+
+# Real generated example:
+"How many days are between January 15, 2024 and March 28, 2025?"
+```
+
+```python Unit Conversion
+# From _CONVERSION_TOOL_TEMPLATES
+"Convert {qty} {from_u} to {to_u}."
+"How many {to_u} are in {qty} {from_u}?"
+
+# Real generated example:
+"Convert 72.5 kilometers to miles."
+```
+</CodeGroup>
+
+### Tool-Call Examples (without numbers)
+
+```python Lookup Queries
+# From _LOOKUP_NO_NUMBERS_TEMPLATES (synthetic_generator.py:326-383)
+"What is the weather in {city}?"
+"What is {ticker} trading at?"
+"Did the {team} win?"
+"What is the exchange rate from {curr1} to {curr2}?"
+"What is the price of {commodity}?"
+
+# Real generated examples:
+"What is the temperature in Tokyo?"
+"Has TSLA gone up or down?"
+"What is the weather forecast for London?"
+```
+
+### No-Tool Examples (with numbers)
+
+<CodeGroup>
+```python Historical Facts
+# From _HISTORICAL_EVENTS (synthetic_generator.py:427-508)
+historical_events = [
+    "The Eiffel Tower was completed in 1889",
+    "World War 2 ended in 1945",
+    "The first iPhone was released in 2007",
+    "Neil Armstrong walked on the Moon in 1969",
+    ...
+]
+
+# Template applied:
+"{event}. What was its significance?"
+
+# Real generated example:
+"World War 2 ended in 1945. What were the consequences?"
+```
+
+```python Static Numeric Facts
+# From _STATIC_NUMERIC_FACTS (synthetic_generator.py:534-575)
+static_facts = [
+    ("The human body has {n} bones", 206),
+    ("Water boils at {n} degrees Celsius at sea level", 100),
+    ("There are {n} continents on Earth", 7),
+    ("Mount Everest is {n} meters tall", 8849),
+    ...
+]
+
+# Real generated example:
+"There are 7 continents on Earth. Why is this the case?"
+```
+</CodeGroup>
+
+### No-Tool Examples (without numbers)
+
+```python Conceptual Questions
+# From _CONCEPTUAL_TEMPLATES (synthetic_generator.py:758-779)
+"What is {concept}?"
+"Explain the concept of {concept}."
+"How would you explain {concept} to a student?"
+
+# Concept pools (synthetic_generator.py:699-756):
+_MATH_CONCEPTS = ["multiplication", "derivative", "factorial", ...]
+_FINANCE_CONCEPTS = ["P/E ratio", "dividend yield", "IPO", ...]
+_TIME_CONCEPTS = ["leap year", "time zone", "UTC", ...]
+_GENERAL_CONCEPTS = ["photosynthesis", "natural selection", ...]
+
+# Real generated examples:
+"What is photosynthesis?"
+"Explain the concept of a derivative."
+"What does 'P/E ratio' mean in finance?"
+```
+
+## Minimal-Pair Counterfactuals
+
+The dataset includes **30 minimal-pair counterfactuals** — near-identical prompt pairs differing only in whether execution is required:
+
+```python Minimal Pairs
+# From _MINIMAL_PAIRS (synthetic_generator.py:859-895)
+(
+    "What is 847 * 293?",                    # tool_call
+    "What does multiplication mean?"          # no_tool
+),
+(
+    "Convert 72 degrees Fahrenheit to Celsius.",  # tool_call  
+    "Why do some countries use Fahrenheit?"        # no_tool
+),
+(
+    "What is the current stock price of Tesla?",  # tool_call
+    "What does 'current' mean in electrical circuits?"  # no_tool
+),
+```
+
+These minimal pairs are the **hardest test** of whether the model has learned the real decision boundary vs. surface pattern shortcuts.
+
+<Warning>
+**Adversarial probing results**: The model achieved 100% on "tool-needed without numbers" and "computation-adjacent definitional" tests, but only 73.3% on "numbers without tool needed" — revealing that the model treats "question about a specific number" as a trigger for tool-call even when the answer is common knowledge.
+</Warning>
+
+## Dataset Statistics
+
+```yaml Key Metrics
+Total examples: 10,000
+Label balance: 50/50 (5,000 tool-call, 5,000 no-tool)
+Tool types: 4 (calculator, lookup, datetime, unit_conversion)
+Max length: 256 tokens
+Split: 80/10/10 (train/val/test)
+Generation: Deterministic (seed=42)
+Template-based: Yes (parametric generation)
+```
+
+<Tip>
+The balance is enforced by drawing from confound-specific template pools in controlled proportions, not by post-hoc filtering. See `generate_dataset()` in `synthetic_generator.py:902-1047` for the allocation logic.
+</Tip>
+
+## Source Code Reference
+
+All dataset generation logic is in:
+```
+~/workspace/source/data/synthetic_generator.py
+```
+
+Key functions:
+- `generate_dataset()` (line 902): Main generation orchestrator
+- `validate_dataset()` (line 1050): Confound balance verification  
+- `format_decision_prompt()` (line 69): Unlabeled prompt formatting
+- `_format_example()` (line 63): Training example formatting with decision token

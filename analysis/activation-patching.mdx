@@ -1,0 +1,184 @@
+---
+title: Activation Patching
+description: Identifying causally important attention heads through activation patching
+---
+
+## Overview
+
+Activation patching is a causal intervention technique that identifies which attention heads are critical for the model's tool-calling decisions. By systematically replacing "clean" activations with "corrupted" ones, we measure each head's importance.
+
+## How It Works
+
+The patching technique follows this process:
+
+1. Run the model on a **tool-needed prompt** (e.g., "What is 47 * 89?") → get clean activations
+2. Run the model on a matched **no-tool prompt** (e.g., "What does multiplication mean?") → get corrupted activations
+3. Re-run the clean prompt but patch in the corrupted head's output at each (layer, head) position
+4. Measure how much the `<|tool_call|>` logit drops
+
+<Note>
+A large drop in the tool-call logit indicates that head is causally important for the tool-calling decision.
+</Note>
+
+## Minimal Pairs
+
+We use carefully designed minimal pairs that differ only in whether a tool is needed:
+
+<CodeGroup>
+```python Pair Generation
+# From activation_patching.py:87-119
+def generate_patching_pairs(
+    n: int,
+    seed: int = CONFIG.data.seed,
+) -> list[PatchingPair]:
+    """Generate n minimal pairs for activation patching."""
+    if n < 1:
+        raise ValueError(f"Need at least 1 patching pair, got {n}")
+
+    import random
+    rng = random.Random(seed)
+
+    pairs: list[PatchingPair] = []
+    for i in range(n):
+        template_tool, template_no_tool = _PAIR_TEMPLATES[i % len(_PAIR_TEMPLATES)]
+
+        a = rng.randint(10, 999)
+        b = rng.randint(2, 999)
+        day = rng.randint(1, 28)
+
+        tool_q = template_tool.format(a=a, b=b, day=day)
+        no_tool_q = template_no_tool.format(a=a, b=b, day=day)
+
+        tool_prompt = f"User: {tool_q}\nAvailable tools: {TOOLS_LIST}\nAssistant:"
+        no_tool_prompt = f"User: {no_tool_q}\nAvailable tools: {TOOLS_LIST}\nAssistant:"
+
+        pairs.append(PatchingPair(tool_prompt=tool_prompt, no_tool_prompt=no_tool_prompt))
+
+    return pairs
+```
+</CodeGroup>
+
+## Implementation
+
+### Patching Hook
+
+The core patching mechanism uses TransformerLens hooks to replace activations:
+
+```python activation_patching.py:126-150
+def _make_patching_hook(
+    corrupted_cache: dict,
+    layer: int,
+    head: int,
+    hook_name: str,
+) -> Callable:
+    """Return a hook that patches in corrupted activations for a specific head.
+    
+    The hook replaces the attention output (z) at (layer, head) with the corresponding
+    value from the corrupted run.
+    """
+    corrupted_z = corrupted_cache[hook_name]
+
+    def hook_fn(
+        activation: Float[Tensor, "batch pos head d_head"],
+        hook,
+    ) -> Float[Tensor, "batch pos head d_head"]:
+        # Patch up to the shorter sequence length
+        min_pos = min(activation.shape[1], corrupted_z.shape[1])
+        activation[:, :min_pos, head, :] = corrupted_z[:, :min_pos, head, :]
+        return activation
+
+    return hook_fn
+```
+
+### Main Patching Loop
+
+For each minimal pair, we compute importance scores for all 144 heads (12 layers × 12 heads):
+
+```python activation_patching.py:235-279
+def _patch_single_pair(
+    model: HookedTransformer,
+    pair: PatchingPair,
+    tokenizer: PreTrainedTokenizerFast,
+    tool_token_id: int,
+    no_tool_token_id: int,
+    n_layers: int,
+    n_heads: int,
+) -> np.ndarray:
+    """Compute importance scores for all (layer, head) from a single minimal pair."""
+    device = next(model.parameters()).device
+
+    # Tokenize both prompts
+    tool_tokens = tokenizer(pair.tool_prompt, return_tensors="pt", padding=True).to(device)
+    no_tool_tokens = tokenizer(pair.no_tool_prompt, return_tensors="pt", padding=True).to(device)
+
+    # 1. Clean run: get baseline logit diff on the tool prompt
+    clean_logits, clean_cache = model.run_with_cache(tool_tokens["input_ids"])
+    clean_diff = _compute_logit_diff(clean_logits, tool_token_id, no_tool_token_id)
+
+    # 2. Corrupted run: cache activations from the no-tool prompt
+    _, corrupted_cache = model.run_with_cache(no_tool_tokens["input_ids"])
+
+    # 3. For each (layer, head), patch corrupted z into the clean run
+    pair_importance = np.zeros((n_layers, n_heads), dtype=np.float64)
+
+    for layer in range(n_layers):
+        hook_name = f"blocks.{layer}.attn.hook_z"
+
+        for head in range(n_heads):
+            hook_fn = _make_patching_hook(corrupted_cache, layer, head, hook_name)
+
+            patched_logits = model.run_with_hooks(
+                tool_tokens["input_ids"],
+                fwd_hooks=[(hook_name, hook_fn)],
+            )
+            patched_diff = _compute_logit_diff(patched_logits, tool_token_id, no_tool_token_id)
+
+            # Importance = how much the tool-call advantage dropped
+            pair_importance[layer, head] = clean_diff - patched_diff
+
+    return pair_importance
+```
+
+## Interpreting Scores
+
+The patching importance score for each head represents:
+
+<CardGroup cols={2}>
+  <Card title="High Score" icon="arrow-up">
+    Head is causally important — corrupting it significantly reduces tool-call probability
+  </Card>
+  <Card title="Low/Zero Score" icon="minus">
+    Head is not critical — other components can compensate for its removal
+  </Card>
+  <Card title="Negative Score" icon="arrow-down">
+    Head suppresses tool-calling — corrupting it actually increases tool-call probability
+  </Card>
+</CardGroup>
+
+### Example Results
+
+For GPT-2 Small fine-tuned on tool-calling:
+
+- **Layer 10, Head 7**: Importance = 2.45 (strong causal effect)
+- **Layer 9, Head 2**: Importance = 1.89 (moderate effect)
+- **Layer 3, Head 8**: Importance = 0.12 (negligible effect)
+
+<Warning>
+Patching importance measures **causal necessity** but not direct contribution. A head might have high patching score even if it doesn't directly write tool-relevant information — it might enable other heads to do so.
+</Warning>
+
+## Related Methods
+
+<CardGroup cols={2}>
+  <Card title="Direct Logit Attribution" icon="chart-line" href="/analysis/logit-attribution">
+    Measures direct linear contributions instead of causal importance
+  </Card>
+  <Card title="Circuit Discovery" icon="diagram-project" href="/analysis/circuit-discovery">
+    Combines patching scores with DLA to identify the full circuit
+  </Card>
+</CardGroup>
+
+## References
+
+- Meng et al. (2022): "Locating and Editing Factual Associations in GPT"
+- Wang et al. (2022): "Interpretability in the Wild: A Circuit for Indirect Object Identification"

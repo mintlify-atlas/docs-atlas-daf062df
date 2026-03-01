@@ -1,0 +1,233 @@
+---
+title: "Research Methodology"
+description: "Overview of the mechanistic interpretability techniques used in this project"
+---
+
+## Methodology Overview
+
+This project uses four complementary interpretability analyses to reverse-engineer the "tool decision circuit" inside GPT-2 Small. Each technique reveals different aspects of how the model makes decisions.
+
+<CardGroup cols={2}>
+  <Card title="Activation Patching" icon="arrow-right-arrow-left">
+    **Causal importance**: Which components matter for the decision?
+  </Card>
+  <Card title="Direct Logit Attribution" icon="arrow-trend-up">
+    **Linear contribution**: Which components write the answer?
+  </Card>
+  <Card title="SAE Feature Analysis" icon="microscope">
+    **Feature-level**: What interpretable features correlate with decisions?
+  </Card>
+  <Card title="Circuit Synthesis" icon="diagram-project">
+    **Integration**: Combine metrics to identify minimal circuits
+  </Card>
+</CardGroup>
+
+## Activation Patching (Causal Importance)
+
+### What It Measures
+
+Activation patching identifies which attention heads are **causally important** for the tool-calling decision.
+
+### How It Works
+
+<Steps>
+  <Step title="Select two prompts">
+    Choose one tool-needed prompt and one tool-not-needed prompt
+  </Step>
+  <Step title="For each attention head">
+    Run both prompts through the model, then swap that head's output between the two prompts
+  </Step>
+  <Step title="Measure logit change">
+    Record how much the `<|tool_call|>` logit drops when the head's output is patched
+  </Step>
+  <Step title="Aggregate across pairs">
+    Repeat for multiple prompt pairs and average the scores
+  </Step>
+</Steps>
+
+**Interpretation**: Large drops = causally important head. If swapping a head's output between tool/no-tool prompts destroys the decision, that head is critical for the computation.
+
+<Info>
+From RESULTS.md: "For each of 144 (layer, head) pairs, we swapped that head's output between a tool-needed and tool-not-needed prompt, measuring how much the `<|tool_call|>` logit dropped."
+</Info>
+
+### Key Findings
+
+Top 5 heads by patching score (from RESULTS.md:250-257):
+
+| Head | Patching Score | Layer Position |
+|------|----------------|----------------|
+| **L7H6** | **0.606** | Mid-network |
+| **L2H1** | **0.592** | Early network |
+| **L6H2** | **0.559** | Mid-network |
+| L4H2 | 0.384 | Mid-network |
+| L10H4 | 0.351 | Late network |
+
+<Warning>
+**Critical finding**: The confound-balanced dataset produces a much flatter importance distribution than the original dataset. The top three heads are within 8% of each other, and **there is no single "tool decision head."** This is strong evidence for distributed computation.
+</Warning>
+
+## Direct Logit Attribution (DLA)
+
+### What It Measures
+
+DLA decomposes the final logit difference into additive contributions from each attention head and MLP layer.
+
+### How It Works
+
+DLA uses the linearity of the residual stream to project each component's contribution through the unembedding matrix:
+
+```python Conceptual Formula
+logit_diff = sum(
+    unembed @ head_output  # Each head's direct contribution
+    for head in all_heads
+) + sum(
+    unembed @ mlp_output   # Each MLP's contribution
+    for mlp in all_mlps  
+)
+```
+
+This tells us which components directly **write** the tool-call decision into the residual stream, as opposed to computing intermediate features.
+
+<Note>
+From RESULTS.md:219: "Decomposed the final logit difference into additive contributions from each attention head and MLP layer via projection through the unembedding matrix."
+</Note>
+
+### Key Findings
+
+Top 5 heads by DLA score (from RESULTS.md:271-276):
+
+| Head | DLA Score | Role |
+|------|-----------|------|
+| **L11H8** | **13.43** | Largest direct contributor to tool logit |
+| **L10H5** | **6.36** | Late-layer readout |
+| **L11H7** | **5.23** | Late-layer readout |
+| **L11H4** | **3.40** | Late-layer readout |
+| **L10H1** | **2.96** | Late-layer readout |
+
+### Compute vs. Readout Dissociation
+
+<Info>
+The heads with the highest **patching importance** (L7H6, L2H1, L6H2) have relatively **low DLA scores** — they do not directly push the logits toward a decision. Instead, they compute intermediate features that later heads read and amplify.
+</Info>
+
+This dissociation suggests a **two-stage pattern**:
+
+1. **Early/mid-network computation** (L2–L7): Heads process the input and write a "this needs a tool" signal into the residual stream
+2. **Late-network readout** (L9–L11): Heads like L11H8 and L11H7 read that signal and translate it into the actual logit difference
+
+## SAE Feature Analysis
+
+### What It Measures
+
+Sparse Autoencoders (SAEs) decompose residual stream activations into sparse, interpretable features. This analysis identifies which features correlate with tool-calling decisions.
+
+### Method
+
+<Steps>
+  <Step title="Load pretrained SAE">
+    Use pretrained sparse autoencoders from [Bloom, 2024](https://huggingface.co/jbloom/GPT2-Small-SAEs-Reformatted) trained on general web text
+  </Step>
+  <Step title="Decompose activations">
+    At the most important layer (L9), decompose residual stream activations into 24,576 sparse features
+  </Step>
+  <Step title="Rank by effect size">
+    Compute Cohen's d effect size between tool-call and no-tool examples for each feature
+  </Step>
+  <Step title="Identify top features">
+    Select the top 20 features by absolute effect size
+  </Step>
+</Steps>
+
+### Key Findings
+
+<Warning>
+**Striking asymmetry**: All 20 top features are **no-tool-favoring** (negative Cohen's d), with effect sizes ranging from d=-12.2 to d=-19.4.
+</Warning>
+
+| Feature | Cohen's d | Tool Mean | No-Tool Mean | Pattern |
+|---------|-----------|-----------|--------------|----------|
+| 3633 | -19.38 | 0.00 | 11.41 | Silent on tool, active on no-tool |
+| 15917 | -19.02 | 0.00 | 13.51 | Silent on tool, active on no-tool |
+| 21369 | -18.45 | 0.00 | 60.69 | Silent on tool, very active on no-tool |
+
+**Interpretation**: The SAE basis (pretrained on general web text) has features that align more naturally with the "static knowledge" concept (no-tool) than with the "needs computation/lookup" concept (tool-call). The model identifies tool-call by the **absence** of these no-tool features rather than the presence of dedicated tool features.
+
+### Causal Validation
+
+<Warning>
+**Critical negative result**: When testing the top 20 SAE features with causal interventions (zeroing each feature individually), **all 20 features produced ~0.000 change** in model logit difference.
+
+From RESULTS.md:418-421: "Individual-feature effects are near zero under this intervention... All 20 features produce ~0.000 change in model logit difference when patched out individually."
+</Warning>
+
+Positive controls confirmed the intervention machinery works, indicating that **features with enormous observational effect sizes (d > 19) can be completely causally inert**.
+
+<Tip>
+This is a cautionary finding: correlation-based interpretability methods (including standard SAE feature analysis) can produce deeply misleading results. **Causal interventions are non-negotiable for mechanistic claims.**
+</Tip>
+
+## Circuit Synthesis and Ablation
+
+### Circuit Identification Method
+
+Combine patching and DLA rankings using geometric mean:
+
+```python Ranking Algorithm
+1. Rank all 144 heads by activation patching score
+2. Rank all 144 heads by DLA score  
+3. Compute geometric mean of ranks for each head
+4. Select top 10th percentile as "circuit heads"
+```
+
+This identifies a **15-head circuit** (from RESULTS.md:310-328).
+
+### Ablation Tests
+
+Two complementary tests validate the circuit:
+
+<Tabs>
+  <Tab title="Sufficiency">
+    **Test**: Keep only the 15 circuit heads, zero-ablate the other 129 heads
+    
+    **Question**: Can the circuit alone reproduce the behavior?
+    
+    **Result**: **50.0% accuracy** (chance-level)
+    
+    **Conclusion**: The circuit alone is **not sufficient**
+  </Tab>
+  <Tab title="Necessity">
+    **Test**: Zero-ablate only the 15 circuit heads, keep the other 129 heads
+    
+    **Question**: Does removing the circuit destroy the behavior?
+    
+    **Result**: **100.0% accuracy** (perfect performance)
+    
+    **Conclusion**: The circuit is **near-non-necessary** in this eval slice
+  </Tab>
+</Tabs>
+
+### Interpretation
+
+<Warning>
+From RESULTS.md:337-342:
+
+"The identified circuit is **not sufficient and near-non-necessary** for the tool-calling decision. Sufficiency at 50% (chance level under aggressive zero-ablation) means the 15 heads alone can't reproduce the behavior. Necessity at 100% means the model works *perfectly* even without these heads in this slice."
+</Warning>
+
+This is fundamentally different from classic circuit findings (like the IOI circuit). With confound-balanced data, the model's decision mechanism is **highly distributed and redundant**. No small subset of heads is critical because:
+
+1. The task is genuinely harder without surface shortcuts
+2. The model has learned a distributed representation where multiple overlapping subsets of heads can independently reconstruct the decision
+3. This redundancy is consistent with the flatter patching score distribution
+
+## Source Code References
+
+All analysis code is in `~/workspace/source/analysis/`:
+
+- **Activation patching**: `activation_patching.py`
+- **Direct logit attribution**: `logit_attribution.py`  
+- **SAE feature analysis**: `sae_features.py`
+- **Circuit synthesis + ablation**: `circuit_discovery.py`
+
+Full experimental design details are in `RESULTS.md` section "Experimental Design" (lines 160-223).

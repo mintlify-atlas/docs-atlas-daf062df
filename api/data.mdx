@@ -1,0 +1,140 @@
+---
+title: 'Data Module'
+description: 'Dataset generation and loading utilities for tool-calling decision training'
+---
+
+## Overview
+
+The data module provides synthetic dataset generation and PyTorch DataLoader creation for training GPT-2 models on tool-calling decisions. The dataset is adversarially balanced to prevent shortcut learning from surface features like numbers or dynamic-cue words.
+
+---
+
+## generate_dataset
+
+Generate an adversarially balanced dataset of tool-call vs no-tool examples.
+
+```python
+from data.synthetic_generator import generate_dataset
+
+examples = generate_dataset(n=10000, seed=42)
+```
+
+<ParamField path="n" type="int" default="CONFIG.data.n_examples">
+  Number of examples to generate. Must be >= 8 and even for 50/50 label balance.
+</ParamField>
+
+<ParamField path="seed" type="int" default="CONFIG.data.seed">
+  Random seed for deterministic generation.
+</ParamField>
+
+<ResponseField name="examples" type="list[ToolExample]">
+  List of exactly n ToolExample instances with:
+  - 50/50 label split (tool_call vs no_tool)
+  - Numbers appear ~equally in both classes
+  - Dynamic-cue words appear ~equally in both classes
+  - Includes minimal-pair counterfactuals
+</ResponseField>
+
+**Raises:**
+- `ValueError` if n < 8 or n is odd
+- `RuntimeError` if unable to generate enough unique examples from templates
+
+---
+
+## ToolExample
+
+Dataclass representing a single training example for the tool-call decision boundary.
+
+```python
+from data.synthetic_generator import ToolExample
+
+example = ToolExample(
+    prompt="What is 847 * 293?",
+    label="tool_call",
+    tool_type="calculator",
+    formatted="User: What is 847 * 293?\nAvailable tools: [calculator, lookup, datetime, unit_conversion]\nAssistant: <|tool_call|>"
+)
+```
+
+<ParamField path="prompt" type="str">
+  The raw user question.
+</ParamField>
+
+<ParamField path="label" type="Literal['tool_call', 'no_tool']">
+  Binary decision — "tool_call" or "no_tool".
+</ParamField>
+
+<ParamField path="tool_type" type="str | None">
+  Which tool category (calculator, lookup, datetime, unit_conversion, or None for no_tool examples).
+</ParamField>
+
+<ParamField path="formatted" type="str">
+  The full string fed to the model during training, including the decision token.
+</ParamField>
+
+---
+
+## format_decision_prompt
+
+Format an unlabeled prompt ending at the decision point.
+
+```python
+from data.synthetic_generator import format_decision_prompt
+
+prompt = format_decision_prompt("What is 847 * 293?")
+# Returns: "User: What is 847 * 293?\nAvailable tools: [calculator, lookup, datetime, unit_conversion]\nAssistant:"
+```
+
+<ParamField path="prompt" type="str">
+  The raw user question.
+</ParamField>
+
+<ResponseField name="formatted" type="str">
+  Formatted string used for analysis-time inference where the model must predict the next token (`<|tool_call|>` vs `<|no_tool|>`) without seeing the answer.
+</ResponseField>
+
+---
+
+## create_dataloaders
+
+Split examples into train/val/test and return three DataLoaders.
+
+```python
+from data.dataset_loader import create_dataloaders
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+train_loader, val_loader, test_loader = create_dataloaders(examples, tokenizer)
+```
+
+<ParamField path="examples" type="list[ToolExample]" required>
+  Non-empty list of ToolExample instances to split.
+</ParamField>
+
+<ParamField path="tokenizer" type="PreTrainedTokenizerFast" required>
+  HuggingFace tokenizer with decision tokens in vocabulary.
+</ParamField>
+
+<ParamField path="config" type="ExperimentConfig" default="CONFIG">
+  Configuration object containing split ratios and training parameters.
+</ParamField>
+
+<ResponseField name="train_loader" type="DataLoader">
+  DataLoader for training set with shuffling enabled.
+</ResponseField>
+
+<ResponseField name="val_loader" type="DataLoader">
+  DataLoader for validation set (no shuffling).
+</ResponseField>
+
+<ResponseField name="test_loader" type="DataLoader">
+  DataLoader for test set (no shuffling).
+</ResponseField>
+
+**Raises:**
+- `ValueError` if examples is empty or split ratios don't sum to 1.0
+
+**Notes:**
+- Labels are set to -100 for all tokens except the decision token position
+- Uses dynamic padding (pads to longest sequence in each batch)
+- Splits are deterministic based on config.data.seed

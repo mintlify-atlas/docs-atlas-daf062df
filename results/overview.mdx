@@ -1,0 +1,161 @@
+---
+title: 'Results Overview'
+description: 'High-level summary of experimental findings and key insights'
+---
+
+## Fine-Tuning Performance
+
+The GPT-2 Small model achieved near-perfect accuracy on the adversarially balanced tool-calling dataset:
+
+<CardGroup cols={2}>
+  <Card title="Test Accuracy" icon="chart-line">
+    **99.5%** (995/1000 correct)
+  </Card>
+  <Card title="Tool-Call Accuracy" icon="wrench">
+    **100%** (510/510 correct)
+  </Card>
+  <Card title="No-Tool Accuracy" icon="book">
+    **98.98%** (485/490 correct)
+  </Card>
+  <Card title="Mean Confidence" icon="bullseye">
+    **99.97%** on correct predictions
+  </Card>
+</CardGroup>
+
+The 5 errors are all false positives (no-tool examples misclassified as tool-call), with low confidence (mean 1.87%). This suggests genuinely ambiguous cases at the decision boundary rather than systematic failures.
+
+<Info>
+  The high accuracy indicates that GPT-2 Small can learn the tool-call/no-tool distinction even when obvious surface features (numbers, dynamic-cue words) are balanced across classes.
+</Info>
+
+## Key Findings
+
+### 1. Distributed Circuit Structure
+
+**The circuit is highly distributed and redundant** — fundamentally different from the original unbalanced dataset analysis:
+
+- **No single dominant head**: Top 3 heads (L7H6, L2H1, L6H2) are within 8% of each other
+- **Flat importance distribution**: Max patching score is only 0.606, vs 4.28 in the original analysis
+- **Top heads span multiple layers**: L2 (early), L4-L7 (mid), L9-L11 (late)
+
+| Head | Patching Score | Role |
+|------|----------------|------|
+| **L7H6** | **0.606** | Primary mid-layer computation |
+| **L2H1** | **0.592** | Early feature extraction |
+| **L6H2** | **0.559** | Mid-layer computation |
+| L4H2 | 0.384 | Mid-layer support |
+| L10H4 | 0.351 | Late readout |
+
+### 2. Circuit Sufficiency and Necessity
+
+Ablation experiments on the 15-head circuit revealed surprising results:
+
+<CodeGroup>
+```json Circuit Performance
+{
+  "full_model": "99.5% accuracy",
+  "sufficiency": {
+    "test": "Keep only 15 circuit heads, zero 129 others",
+    "accuracy": "50.0%",
+    "interpretation": "Circuit alone is NOT sufficient"
+  },
+  "necessity": {
+    "test": "Zero only 15 circuit heads, keep 129 others",
+    "accuracy": "100.0%",
+    "interpretation": "Circuit is near-non-necessary"
+  }
+}
+```
+</CodeGroup>
+
+<Warning>
+  The identified circuit is **not sufficient and near-non-necessary** for the tool-calling decision. This contrasts sharply with the original analysis (necessity was 76.7%). The mechanism is **highly distributed and redundant**.
+</Warning>
+
+### 3. Impact of Confound Balancing
+
+**L6H4, the originally dominant head, became irrelevant** when numbers were balanced:
+
+- **Original analysis**: L6H4 scored 4.28 (3× higher than any other head)
+- **Balanced dataset**: L6H4 patching score ≈ 0 (outside top 15)
+- **Interpretation**: L6H4's original dominance was driven by number-detection shortcuts
+
+When numbers appear equally in both classes, L6H4 stops attending to them and becomes largely inert. This is strong evidence that **the circuits we find depend on the confounds we allow**.
+
+### 4. Compute → Readout Pattern Persists
+
+The two-stage processing pattern remains robust:
+
+**Stage 1: Early/Mid-Network Computation (L2–L7)**
+- Heads process input and write "this needs a tool" signal
+- High patching importance, low DLA scores
+- Examples: L2H1, L6H2, L7H6
+
+**Stage 2: Late-Network Readout (L9–L11)**
+- Heads read the signal and translate to logit differences
+- Low patching importance, high DLA scores
+- Examples: L11H8 (DLA: 13.43), L10H5 (DLA: 6.36), L11H7 (DLA: 5.23)
+
+### 5. Unified Tool-Type Circuit
+
+The model uses **a single circuit for all tool types**:
+
+| Tool Type | Top Head | Top-10 Overlap with Calculator |
+|-----------|----------|--------------------------------|
+| Calculator | L2H1 (0.94) | — |
+| Lookup | L2H1 (1.44) | 9/10 |
+| Datetime | L2H1 (0.79) | 9/10 |
+| Unit Conversion | L2H1 (1.98) | 10/10 |
+
+L2H1 dominates across 3 of 4 tool types, suggesting it performs general "needs external processing" detection that is largely tool-type-agnostic.
+
+## Circuit Size Analysis
+
+A circuit-size sweep (100 balanced cases) revealed that behavior is recovered only with large fractions of heads:
+
+| Heads Kept | Sufficiency | Necessity |
+|------------|-------------|------------|
+| 1–30 heads | 50% | 100% |
+| 60 heads | 86% | 55% |
+| 100 heads | 99% | 50% |
+| 140 heads | 100% | 50% |
+
+<Tip>
+  **Interpretation**: The mechanism appears distributed/redundant — performance is recovered only when large fractions of heads are retained. Many overlapping subsets can independently reconstruct the decision.
+</Tip>
+
+## Training Dynamics
+
+The circuit exhibits **phase-transition-like emergence**:
+
+- **Step 200**: 60% accuracy, all patching scores ≈ 0
+- **Step 300**: 96% accuracy, multiple heads activate simultaneously
+- **Circuit snaps into place** within a single 100-step window
+- **L2H1 dominates from the start** once the circuit appears
+- **L6H4 remains marginal** throughout training (never exceeds 0.05)
+
+## What This Means
+
+The adversarial balancing reveals a critical insight:
+
+<Card title="Key Takeaway" icon="lightbulb">
+  **The circuits we find depend on the confounds we allow.** A clean, localized circuit (L6H4-dominated) emerged when surface features correlated with the label. Removing those correlations didn't destroy the model's ability to learn the task (99.5% accuracy), but it did destroy the clean circuit.
+</Card>
+
+The resulting mechanism is distributed, redundant, and harder to characterize — arguably more representative of how real-world models process complex decisions.
+
+## Next Steps
+
+Explore the detailed findings, visualizations, and limitations in the following pages:
+
+<CardGroup cols={3}>
+  <Card title="Detailed Findings" icon="microscope" href="/results/findings">
+    Dive into activation patching, DLA, SAE features, and more
+  </Card>
+  <Card title="Visualizations" icon="chart-bar" href="/results/visualizations">
+    Learn how to interpret the heatmaps and plots
+  </Card>
+  <Card title="Limitations" icon="triangle-exclamation" href="/results/limitations">
+    Understand the constraints and future directions
+  </Card>
+</CardGroup>

@@ -1,0 +1,297 @@
+---
+title: Sparse Autoencoder (SAE) Analysis
+description: Identifying interpretable features that drive tool-calling decisions
+---
+
+## Overview
+
+Sparse Autoencoders (SAEs) decompose dense neural network activations into sparse, interpretable features. For tool-calling, SAEs help identify which learned features (e.g., "needs computation," "numerical context," "tool available") differentially activate between tool-call and no-tool examples.
+
+## Why Use SAEs?
+
+<CardGroup cols={2}>
+  <Card title="Superposition Problem" icon="layer-group">
+    Neural networks pack many features into fewer dimensions. A single neuron can represent multiple unrelated concepts.
+  </Card>
+  <Card title="SAE Solution" icon="expand">
+    SAEs expand activations into a larger sparse space where each feature is more interpretable and monosemantic.
+  </Card>
+</CardGroup>
+
+### The Interpretability Advantage
+
+Instead of analyzing 768-dimensional residual stream vectors, we analyze 24,576 sparse SAE features where:
+
+- Each feature activates rarely (sparsity ~5%)
+- Features correspond to interpretable concepts
+- Feature activation magnitudes indicate concept strength
+
+## Analysis Pipeline
+
+<Steps>
+  <Step title="Load Pretrained SAE">
+    Load SAE for a target layer identified by activation patching
+  </Step>
+  <Step title="Extract Feature Activations">
+    Run model on tool/no-tool examples and encode activations through SAE
+  </Step>
+  <Step title="Rank by Effect Size">
+    Compute Cohen's d to identify features with largest difference between classes
+  </Step>
+  <Step title="Report Top Features">
+    Return top-k features with activation statistics and p-values
+  </Step>
+</Steps>
+
+## Implementation
+
+### Loading SAEs
+
+We use pretrained SAEs from Joseph Bloom's GPT2-Small-SAEs-Reformatted collection:
+
+```python sae_features.py:48-81
+def load_sae_for_layer(
+    layer: int,
+    config: ExperimentConfig = CONFIG,
+) -> SAE:
+    """Load the pretrained SAE for a specific residual stream layer.
+    
+    Uses sae_lens to load from the jbloom/GPT2-Small-SAEs-Reformatted collection.
+    Each layer has a separate SAE trained on that layer's residual stream activations.
+    """
+    if layer < 0 or layer >= config.model.n_layers:
+        raise ValueError(
+            f"layer must be in [0, {config.model.n_layers}), got {layer}"
+        )
+
+    hook_point = f"blocks.{layer}.hook_resid_pre"
+    sae = SAE.from_pretrained(
+        release=config.analysis.sae_repo_id,
+        sae_id=hook_point,
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    sae = sae.to(device)
+
+    logger.info("Loaded SAE for layer %d (hook: %s), n_features=%d", 
+                layer, hook_point, sae.cfg.d_sae)
+
+    # Store the hook point on the SAE for downstream use
+    sae._hook_point = hook_point
+
+    return sae
+```
+
+### Extracting Feature Activations
+
+```python sae_features.py:88-134
+def extract_sae_activations(
+    model: HookedTransformer,
+    sae: SAE,
+    prompts: list[str],
+    tokenizer: PreTrainedTokenizerFast,
+    position: int = -1,
+) -> np.ndarray:
+    """Extract SAE feature activations for a batch of prompts at a specific position.
+    
+    Returns (n_prompts, n_features) array of non-negative feature activations.
+    Each row sums to > 0 if the SAE has any active features at that position.
+    """
+    if not prompts:
+        raise ValueError("prompts must be non-empty")
+
+    device = next(model.parameters()).device
+    n_features = sae.cfg.d_sae
+    activations = np.zeros((len(prompts), n_features), dtype=np.float32)
+
+    for i, prompt in enumerate(prompts):
+        tokens = tokenizer(prompt, return_tensors="pt").to(device)
+        _, cache = model.run_with_cache(tokens["input_ids"])
+
+        # Get residual stream at the SAE's hook point
+        hook_name = sae._hook_point
+        resid = cache[hook_name]  # [batch=1, seq_len, d_model]
+
+        # Extract at the target position
+        resid_at_pos = resid[:, position, :]  # [1, d_model]
+
+        # Encode through SAE to get feature activations
+        feature_acts = sae.encode(resid_at_pos)  # [1, n_features]
+        activations[i] = feature_acts.detach().cpu().numpy().squeeze(0)
+
+    clear_gpu_cache()
+    return activations
+```
+
+## Cohen's d Effect Size
+
+We use Cohen's d instead of raw mean difference because it accounts for variance:
+
+```
+Cohen's d = (mean_tool - mean_no_tool) / pooled_std
+```
+
+where:
+
+```
+pooled_std = sqrt(((n1-1)*s1² + (n2-1)*s2²) / (n1+n2-2))
+```
+
+<Info>
+**Cohen's d interpretation**:
+- |d| < 0.2: Small effect
+- |d| = 0.5: Medium effect
+- |d| > 0.8: Large effect
+
+Positive d means the feature activates more for tool-call examples.
+</Info>
+
+### Implementation
+
+```python sae_features.py:141-203
+def rank_features_by_effect_size(
+    tool_activations: np.ndarray,
+    no_tool_activations: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Rank SAE features by Cohen's d between tool-call and no-tool distributions.
+    
+    Returns (feature_indices, cohen_d_values, p_values) all sorted by |Cohen's d| descending.
+    p_values are Bonferroni-corrected.
+    """
+    n_features = tool_activations.shape[1]
+    n_tool = tool_activations.shape[0]
+    n_no_tool = no_tool_activations.shape[0]
+
+    mean_tool = tool_activations.mean(axis=0)
+    mean_no_tool = no_tool_activations.mean(axis=0)
+    std_tool = tool_activations.std(axis=0, ddof=1)
+    std_no_tool = no_tool_activations.std(axis=0, ddof=1)
+
+    # Pooled standard deviation
+    pooled_std = np.sqrt(
+        ((n_tool - 1) * std_tool**2 + (n_no_tool - 1) * std_no_tool**2)
+        / (n_tool + n_no_tool - 2)
+    )
+
+    # Avoid division by zero
+    safe_pooled = np.where(pooled_std > 0, pooled_std, 1.0)
+    cohen_d = (mean_tool - mean_no_tool) / safe_pooled
+    cohen_d = np.where(pooled_std > 0, cohen_d, 0.0)
+
+    # Independent two-sample t-tests with Bonferroni correction
+    raw_p_values = np.ones(n_features, dtype=np.float64)
+    for j in range(n_features):
+        if pooled_std[j] == 0:
+            continue
+        _, p = stats.ttest_ind(
+            tool_activations[:, j],
+            no_tool_activations[:, j],
+            equal_var=False,  # Welch's t-test
+        )
+        raw_p_values[j] = p
+
+    # Bonferroni correction
+    corrected_p = np.minimum(raw_p_values * n_features, 1.0)
+
+    # Sort by |Cohen's d| descending
+    sort_idx = np.argsort(-np.abs(cohen_d))
+    return sort_idx, cohen_d[sort_idx], corrected_p[sort_idx]
+```
+
+## Complete Analysis Pipeline
+
+```python sae_features.py:253-304
+def analyze_layer(
+    model: HookedTransformer,
+    sae: SAE,
+    tool_prompts: list[str],
+    no_tool_prompts: list[str],
+    tokenizer: PreTrainedTokenizerFast,
+    config: ExperimentConfig = CONFIG,
+) -> dict:
+    """Run the complete SAE feature analysis pipeline for a single layer.
+    
+    Returns dict with:
+        - "layer": int
+        - "n_features_total": int
+        - "top_features": list of feature dicts from get_top_differential_features
+        - "n_significant": int — count of features exceeding the threshold
+        - "tool_sparsity": float — mean fraction of active features per tool example
+        - "no_tool_sparsity": float — same for no-tool examples
+    """
+    logger.info("Extracting SAE activations for %d tool + %d no-tool prompts",
+                len(tool_prompts), len(no_tool_prompts))
+
+    tool_acts = extract_sae_activations(model, sae, tool_prompts, tokenizer)
+    no_tool_acts = extract_sae_activations(model, sae, no_tool_prompts, tokenizer)
+
+    top_features = get_top_differential_features(
+        tool_acts, no_tool_acts,
+        k=config.analysis.sae_top_k_features,
+        threshold=config.analysis.cohen_d_threshold,
+    )
+
+    # Sparsity: fraction of features that are active (> 0) per example, averaged
+    tool_sparsity = float((tool_acts > 0).mean())
+    no_tool_sparsity = float((no_tool_acts > 0).mean())
+
+    # Extract layer index from the SAE's hook point
+    layer = int(sae._hook_point.split(".")[1])
+
+    return {
+        "layer": layer,
+        "n_features_total": tool_acts.shape[1],
+        "top_features": top_features,
+        "n_significant": len(top_features),
+        "tool_sparsity": tool_sparsity,
+        "no_tool_sparsity": no_tool_sparsity,
+    }
+```
+
+## Example Results
+
+For Layer 10 SAE with 24,576 features:
+
+| Feature ID | Cohen's d | p-value | Mean (Tool) | Mean (No-Tool) | Interpretation |
+|------------|-----------|---------|-------------|----------------|----------------|
+| 14,523 | +2.34 | < 0.001 | 3.82 | 0.15 | **Numerical computation** feature |
+| 8,901 | +1.89 | < 0.001 | 2.41 | 0.33 | **Tool availability** detector |
+| 19,445 | -1.67 | < 0.001 | 0.22 | 2.98 | **Conceptual question** feature |
+| 3,256 | +1.45 | 0.002 | 1.87 | 0.41 | **Arithmetic operator** |
+
+<Check>
+**Typical sparsity**: ~5% of features active per example
+
+**Significant features**: 20-30 features with |d| > 0.8 and p < 0.05
+</Check>
+
+## Visualizing Features
+
+To understand what a feature represents:
+
+1. **Find maximum activating examples**: Which inputs make this feature fire strongly?
+2. **Ablate the feature**: How does zeroing it affect model behavior?
+3. **Analyze feature direction**: What does the feature vector in residual stream space represent?
+
+<Warning>
+Not all high-Cohen's-d features are interpretable. Some may be **polysemantic** (representing multiple concepts) or **noisy artifacts** of the training distribution.
+</Warning>
+
+## Related Methods
+
+<CardGroup cols={3}>
+  <Card title="Activation Patching" icon="flask" href="/analysis/activation-patching">
+    Identifies which layers to focus SAE analysis on
+  </Card>
+  <Card title="Circuit Discovery" icon="diagram-project" href="/analysis/circuit-discovery">
+    Uses SAE features to explain circuit behavior
+  </Card>
+  <Card title="Attention Analysis" icon="eye" href="/analysis/attention-analysis">
+    SAE features help interpret what attention heads compute
+  </Card>
+</CardGroup>
+
+## References
+
+- Cunningham et al. (2023): "Sparse Autoencoders Find Highly Interpretable Features in Language Models"
+- Joseph Bloom: [GPT2-Small-SAEs-Reformatted](https://huggingface.co/jbloom/GPT2-Small-SAEs-Reformatted)

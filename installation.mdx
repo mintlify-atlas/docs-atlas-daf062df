@@ -1,0 +1,498 @@
+---
+title: Installation
+description: Detailed setup guide for the tool-calling mechanistic interpretability project
+---
+
+# Installation Guide
+
+Complete setup instructions for running the tool-calling mechanistic interpretability pipeline.
+
+## System Requirements
+
+### Python Version
+
+<Note>
+**Required**: Python 3.8 or higher
+</Note>
+
+Verify your Python version:
+
+```bash
+python --version
+```
+
+### Hardware Requirements
+
+#### GPU (Recommended)
+
+The project is designed for single-GPU setups:
+
+- **Tested on**: NVIDIA RTX 3060 12GB
+- **VRAM usage**: ~2.7GB peak during fine-tuning
+- **Recommended**: Any CUDA-capable GPU with ≥8GB VRAM
+- **Runtime**: ~5 minutes for full pipeline
+
+<Info>
+GPU acceleration provides 3-4× speedup over CPU. The pipeline uses:
+- Mixed precision training (fp16)
+- Gradient checkpointing to reduce memory
+- Batch size 4 with gradient accumulation 4 (effective batch 16)
+</Info>
+
+#### CPU-Only Mode
+
+Fully supported but slower:
+
+- **Recommended**: 8+ CPU cores
+- **RAM**: 16GB minimum
+- **Runtime**: ~15-20 minutes for full pipeline
+- Automatically falls back when CUDA unavailable
+
+### Disk Space
+
+- **Source code**: ~10MB
+- **Dependencies**: ~3GB (PyTorch, TransformerLens, etc.)
+- **Model checkpoints**: ~500MB (GPT-2 Small fine-tuned)
+- **Results/data**: ~200MB
+- **SAE artifacts** (optional): ~1GB if downloaded
+- **Total**: ~5GB recommended
+
+## Installation Steps
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone <your-repo-url>
+    cd tool-call-mech-interp
+    ```
+  </Step>
+
+  <Step title="Create virtual environment (recommended)">
+    <CodeGroup>
+    ```bash venv
+    python -m venv venv
+    source venv/bin/activate  # On Windows: venv\Scripts\activate
+    ```
+
+    ```bash conda
+    conda create -n mech-interp python=3.10
+    conda activate mech-interp
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Install dependencies">
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+    This installs the following packages:
+  </Step>
+</Steps>
+
+### Core Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|----------|
+| `torch` | ≥2.1.0 | Deep learning framework |
+| `transformer_lens` | ≥1.14.0 | Mechanistic interpretability toolkit (activation patching, hooks) |
+| `sae_lens` | ≥3.0.0 | Sparse autoencoder analysis |
+| `transformers` | ≥4.35.0 | HuggingFace transformers (GPT-2 model/tokenizer) |
+| `datasets` | ≥2.14.0 | Dataset utilities |
+
+### Tensor Utilities
+
+| Package | Version | Purpose |
+|---------|---------|----------|
+| `einops` | ≥0.7.0 | Readable tensor operations |
+| `jaxtyping` | ≥0.2.25 | Runtime shape checking |
+| `fancy_einsum` | ≥0.0.3 | Named einsum operations |
+
+### Visualization
+
+| Package | Version | Purpose |
+|---------|---------|----------|
+| `plotly` | ≥5.18.0 | Interactive plots |
+| `kaleido` | ≥0.2.1 | Static image export (heatmaps) |
+
+### Experiment Tracking
+
+| Package | Version | Purpose |
+|---------|---------|----------|
+| `wandb` | ≥0.16.0 | Optional: experiment logging |
+
+### Testing & Utilities
+
+| Package | Version | Purpose |
+|---------|---------|----------|
+| `pytest` | ≥7.4.0 | Test runner |
+| `pytest-cov` | ≥4.1.0 | Coverage reporting |
+| `tqdm` | ≥4.66.0 | Progress bars |
+| `numpy` | ≥1.24.0 | Numerical computing |
+| `pandas` | ≥2.0.0 | Data analysis |
+| `scipy` | ≥1.11.0 | Scientific computing (Cohen's d, stats) |
+
+## Verify Installation
+
+<Steps>
+  <Step title="Import core libraries">
+    ```bash
+    python -c "import torch; import transformer_lens; import transformers; print('✓ Core imports OK')"
+    ```
+  </Step>
+
+  <Step title="Check CUDA availability">
+    ```bash
+    python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'Device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"CPU\"}')"
+    ```
+
+    Expected output:
+    ```
+    CUDA available: True
+    Device: NVIDIA GeForce RTX 3060
+    ```
+
+    Or on CPU:
+    ```
+    CUDA available: False
+    Device: CPU
+    ```
+  </Step>
+
+  <Step title="Run test suite">
+    ```bash
+    pytest -q
+    ```
+
+    Expected output:
+    ```
+    ....                                                                 [100%]
+    4 passed in 2.34s
+    ```
+  </Step>
+
+  <Step title="Verify pipeline config">
+    ```bash
+    python -c "from configs.experiment_config import CONFIG; CONFIG.paths.ensure_dirs(); print('✓ Config loaded, directories created')"
+    ```
+
+    This creates output directories:
+    - `results/data/`
+    - `results/figures/`
+    - `results/logs/`
+    - `checkpoints/`
+  </Step>
+</Steps>
+
+## Configuration
+
+All hyperparameters are centralized in `configs/experiment_config.py`:
+
+```python
+@dataclass(frozen=True)
+class TrainConfig:
+    """Fine-tuning hyperparameters. Tuned for RTX 3060 12GB."""
+    batch_size: int = 4
+    gradient_accumulation_steps: int = 4  # effective batch = 16
+    epochs: int = 3
+    lr: float = 5e-5
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
+    max_grad_norm: float = 1.0
+    fp16: bool = True
+    gradient_checkpointing: bool = True
+    seed: int = 42
+```
+
+### Memory Optimization
+
+If you encounter OOM (out of memory) errors:
+
+<Steps>
+  <Step title="Reduce batch size">
+    Edit `configs/experiment_config.py`:
+    ```python
+    batch_size: int = 2  # down from 4
+    gradient_accumulation_steps: int = 8  # up from 4
+    # Keeps effective batch size = 16
+    ```
+  </Step>
+
+  <Step title="Enable aggressive checkpointing">
+    Already enabled by default:
+    ```python
+    gradient_checkpointing: bool = True
+    ```
+  </Step>
+
+  <Step title="Disable fp16 (if GPU doesn't support)">
+    ```python
+    fp16: bool = False
+    ```
+    Warning: Increases memory usage ~2×
+  </Step>
+</Steps>
+
+## Optional: Pre-download SAE Artifacts
+
+Sparse autoencoder analysis requires pretrained SAEs from HuggingFace Hub. These are auto-downloaded on first run, but you can pre-fetch:
+
+```bash
+pip install huggingface_hub
+huggingface-cli download jbloom/GPT2-Small-SAEs-Reformatted
+```
+
+<Note>
+If SAE download fails (offline/firewall), the pipeline logs a warning and skips SAE analysis (non-fatal). Activation patching, DLA, and circuit synthesis still run.
+</Note>
+
+## Troubleshooting
+
+### Common Issues
+
+<AccordionGroup>
+  <Accordion title="ImportError: No module named 'transformer_lens'">
+    TransformerLens installation failed. Try:
+    ```bash
+    pip install transformer-lens --no-cache-dir
+    ```
+
+    Or install from source:
+    ```bash
+    pip install git+https://github.com/TransformerLensOrg/TransformerLens.git
+    ```
+  </Accordion>
+
+  <Accordion title="CUDA out of memory during fine-tuning">
+    **Symptoms**: `RuntimeError: CUDA out of memory. Tried to allocate X MiB`
+
+    **Solutions**:
+    1. Reduce batch size (see Memory Optimization above)
+    2. Close other GPU processes: `nvidia-smi` to check usage
+    3. Clear GPU cache before running:
+       ```python
+       import torch
+       torch.cuda.empty_cache()
+       ```
+    4. Switch to CPU-only (slower):
+       ```bash
+       export CUDA_VISIBLE_DEVICES=""
+       python run_pipeline.py
+       ```
+  </Accordion>
+
+  <Accordion title="Kaleido installation fails on Linux">
+    **Symptoms**: Plotly can't export static images
+
+    **Solution**: Install system dependencies:
+    ```bash
+    # Ubuntu/Debian
+    sudo apt-get update
+    sudo apt-get install -y libgconf-2-4 libatk1.0-0 libatk-bridge2.0-0 libgdk-pixbuf2.0-0 libgtk-3-0 libgbm-dev libnss3-dev libxss-dev
+
+    # Then reinstall kaleido
+    pip install --force-reinstall kaleido
+    ```
+
+    **Workaround**: Skip visualization:
+    ```bash
+    python run_pipeline.py --skip-visualization
+    ```
+  </Accordion>
+
+  <Accordion title="SAE download hangs or times out">
+    **Symptoms**: Script hangs at "Loading SAE for layer X"
+
+    **Solutions**:
+    1. Check internet connection
+    2. Pre-download manually:
+       ```bash
+       huggingface-cli download jbloom/GPT2-Small-SAEs-Reformatted
+       ```
+    3. Use local_files_only if already cached:
+       Edit `analysis/sae_features.py` and add `local_files_only=True` to SAE.from_pretrained()
+    4. Skip SAE analysis (it's non-critical for core results)
+  </Accordion>
+
+  <Accordion title="Test accuracy <95% after fine-tuning">
+    **Expected**: 99.5% test accuracy
+
+    **Possible causes**:
+    - Random seed variance (try re-running with different seed)
+    - Insufficient training (increase epochs in config)
+    - Hardware differences (fp16 precision varies across GPUs)
+    - Data loading issue (verify `results/data/dataset.json` has 10,000 examples)
+
+    **Debug**:
+    ```bash
+    # Check dataset balance
+    python -c "from data.synthetic_generator import generate_dataset, validate_dataset; validate_dataset(generate_dataset())"
+
+    # Inspect checkpoint
+    python -c "import torch; ckpt = torch.load('checkpoints/best/pytorch_model.bin'); print(f'Checkpoint keys: {list(ckpt.keys())[:5]}')"
+    ```
+  </Accordion>
+
+  <Accordion title="ModuleNotFoundError on imports">
+    **Symptoms**: `ModuleNotFoundError: No module named 'configs'` or similar
+
+    **Solution**: Run from project root:
+    ```bash
+    cd /path/to/tool-call-mech-interp
+    python run_pipeline.py  # NOT: cd scripts/ && python ../run_pipeline.py
+    ```
+
+    Or add to PYTHONPATH:
+    ```bash
+    export PYTHONPATH="${PYTHONPATH}:/path/to/tool-call-mech-interp"
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Performance Tuning
+
+<Tabs>
+  <Tab title="Speed Optimization">
+    **Reduce runtime for experiments:**
+
+    1. **Reduce patching pairs** (trade accuracy for speed):
+       ```python
+       # configs/experiment_config.py
+       n_patching_pairs: int = 20  # down from 50
+       ```
+
+    2. **Skip visualization**:
+       ```bash
+       python run_pipeline.py --skip-visualization
+       ```
+
+    3. **Analysis-only mode** (skip re-training):
+       ```bash
+       python run_pipeline.py --phase analysis
+       ```
+
+    4. **Use faster GPU** if available (RTX 4090: ~2 min, A100: ~90 sec)
+  </Tab>
+
+  <Tab title="Memory Optimization">
+    **For GPUs with less than 8GB VRAM or CPU:**
+
+    1. **Reduce batch size** (see Configuration section)
+
+    2. **Lower patching batch size**:
+       ```python
+       # configs/experiment_config.py
+       patching_batch_size: int = 5  # down from 10
+       ```
+
+    3. **Disable gradient checkpointing** (if you have enough memory):
+       ```python
+       gradient_checkpointing: bool = False
+       # Speeds up training ~15% but uses ~1.5× memory
+       ```
+
+    4. **Use CPU offloading** (experimental):
+       ```python
+       # Manually edit finetune/trainer.py to add:
+       model = model.to('cpu')
+       # Load activations to GPU only when needed
+       ```
+  </Tab>
+
+  <Tab title="Reproducibility">
+    **Ensure exact result replication:**
+
+    1. **Fix all seeds** (already done in config):
+       ```python
+       seed: int = 42  # data, train, analysis
+       ```
+
+    2. **Deterministic CUDA operations**:
+       ```bash
+       export CUBLAS_WORKSPACE_CONFIG=:4096:8
+       ```
+       Add to `run_pipeline.py`:
+       ```python
+       torch.use_deterministic_algorithms(True)
+       ```
+
+    3. **Pin library versions**:
+       ```bash
+       pip freeze > requirements_exact.txt
+       ```
+
+    4. **Document hardware**:
+       ```bash
+       nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+       ```
+  </Tab>
+</Tabs>
+
+## Advanced Setup
+
+### WandB Integration (Optional)
+
+Enable experiment tracking with Weights & Biases:
+
+<Steps>
+  <Step title="Login to WandB">
+    ```bash
+    wandb login
+    ```
+  </Step>
+
+  <Step title="Enable logging">
+    Edit `finetune/trainer.py` to uncomment:
+    ```python
+    # import wandb
+    # wandb.init(project="tool-call-mech-interp", config=CONFIG)
+    ```
+  </Step>
+</Steps>
+
+### Docker Setup (Experimental)
+
+Run in isolated environment:
+
+```dockerfile
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /workspace
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+CMD ["python", "run_pipeline.py"]
+```
+
+```bash
+docker build -t mech-interp .
+docker run --gpus all -v $(pwd)/results:/workspace/results mech-interp
+```
+
+### Multi-GPU Support (Not Yet Implemented)
+
+Current limitation: Single-GPU only. For multi-GPU:
+
+<Warning>
+**TODO**: Wrap trainer in DistributedDataParallel. TransformerLens hooks may not play well with DDP — use `find_unused_parameters=True` or manual gradient synchronization.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Run Quickstart" icon="rocket" href="/quickstart">
+    Execute your first full pipeline run
+  </Card>
+  <Card title="Read Results" icon="book-open" href="https://github.com/your-repo/RESULTS.md">
+    Understand the experimental findings
+  </Card>
+</CardGroup>
+
+---
+
+**Need help?** Open an issue on GitHub with:
+- Python version (`python --version`)
+- GPU info (`nvidia-smi`)
+- Full error traceback
+- Output of `pip list | grep -E "torch|transformer"`

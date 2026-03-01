@@ -1,97 +1,135 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: Introduction
+description: Mechanistic interpretability research on how GPT-2 models decide when to call tools vs answer directly
 ---
 
-## Setting up
+# Tool-Call Mechanistic Interpretability
 
-Get your documentation site up and running in minutes.
+This project investigates a fundamental question in language model agents: **when a model decides to call a tool versus answer directly, what's actually happening inside the network?**
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+Large language models are increasingly used as agents that can invoke external tools (calculators, search engines, APIs). But we have no mechanistic understanding of *how* the model makes that binary decision. This experiment uses interpretability techniques from the circuits literature — activation patching, direct logit attribution (DLA), and sparse autoencoder (SAE) feature analysis — to reverse-engineer the "tool decision circuit" inside a fine-tuned GPT-2 Small (124M parameters).
 
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get the pipeline running in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed setup and requirements
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Full Results" icon="chart-line" href="https://github.com/your-repo/RESULTS.md">
+    Read the complete research findings
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Source Code" icon="code" href="https://github.com/your-repo">
+    Explore the implementation
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## The Research Question
 
-Everything you need to create world-class documentation.
+**Primary question:** How do transformer circuits decide when to call a tool versus answer directly? Can we identify specific attention heads or SAE features that drive tool-invocation decisions?
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+**Secondary question:** Are the circuits identified under standard datasets robust to adversarial confound removal, or do they partially reflect surface-feature shortcuts?
 
-## Need inspiration?
+## What We Found
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+Through a series of interpretability experiments on a fine-tuned GPT-2 Small model, we discovered:
+
+<Info>
+**Key Finding**: With adversarially-balanced data (removing number/keyword shortcuts), the tool-calling decision is **highly distributed and redundant** across attention heads. No small subset of heads is both sufficient and necessary.
+</Info>
+
+### Core Results
+
+1. **Distributed Circuit**: Top 3 heads by activation patching (L7H6, L2H1, L6H2) are within 8% of each other — no single "tool decision head" dominates
+
+2. **Two-Stage Pattern**: Early/mid-network heads (L2-L7) compute intermediate features; late-network heads (L9-L11) read and amplify the signal
+
+3. **Surface Shortcuts**: In the original analysis, L6H4 dominated by detecting numbers. When numbers were balanced across classes, L6H4 became irrelevant (score ≈ 0)
+
+4. **Circuit Ablation**:
+   - **Sufficiency**: 50% accuracy (chance level) when keeping only 15 circuit heads
+   - **Necessity**: 100% accuracy when removing those 15 heads
+   - Interpretation: Behavior is highly redundant
+
+5. **Unified Tool Circuit**: 8-10/10 overlap in top heads across all tool types (calculator, lookup, datetime, unit_conversion)
+
+6. **SAE Features**: Top 20 features by Cohen's d (effect sizes -12 to -19) are all no-tool-favoring, but show near-zero individual causal effect when patched
+
+## The Dataset
+
+A critical design choice: our dataset is **adversarially balanced** to eliminate surface-feature shortcuts:
+
+| Confound | Tool-call | No-tool | Purpose |
+|----------|-----------|---------|----------|
+| **Numbers present** | 59.9% | 59.4% | Prevents "numbers → tool" shortcut |
+| **Dynamic-cue words** ("current", "today") | 34.3% | 29.4% | Prevents "temporal keyword → tool" shortcut |
+
+**Dataset statistics:**
+- 10,000 examples (5,000 tool-call, 5,000 no-tool)
+- 4 tool types: calculator, lookup, datetime, unit_conversion
+- 80/10/10 train/val/test split
+- Max length: 256 tokens
+- Deterministic generation (seed=42)
+
+## Model Performance
+
+| Metric | Value |
+|--------|-------|
+| Test accuracy | **99.5%** (995/1000) |
+| Tool-call accuracy | 100% (510/510) |
+| No-tool accuracy | 98.98% (485/490) |
+| Mean confidence (correct) | 99.97% |
+| Training epochs | 2 (early stopped) |
+
+## What This Repo Contains
+
+<CardGroup cols={2}>
+  <Card title="Data Generation" icon="database">
+    Confound-balanced synthetic dataset with 2×2 design for numbers and temporal keywords
+  </Card>
+  <Card title="Fine-tuning Pipeline" icon="brain">
+    GPT-2 Small training on binary tool-call decision task
+  </Card>
+  <Card title="Interpretability Analyses" icon="magnifying-glass">
+    Activation patching, DLA, SAE features, circuit synthesis & ablation
+  </Card>
+  <Card title="Follow-up Experiments" icon="flask">
+    Training dynamics, seed robustness, positive controls, circuit-size sweeps
+  </Card>
+</CardGroup>
+
+### Key Files
+
+- `run_pipeline.py`: End-to-end orchestrator for all phases
+- `configs/experiment_config.py`: Centralized configuration
+- `RESULTS.md`: Detailed findings, limitations, and continuation questions
+- `data/`: Dataset generation with adversarial confound balancing
+- `finetune/`: GPT-2 training infrastructure
+- `analysis/`: Activation patching, DLA, SAE analysis, circuit discovery
+- `scripts/`: Follow-up experiments (deep_analysis, training_dynamics, etc.)
+- `tests/`: Regression tests for prompt formatting and ablation validation
+
+## Limitations
+
+<Warning>
+This is a **toy research setting**: GPT-2 Small (124M params) on a synthetic dataset with 99.5% accuracy. Real tool-calling in frontier models involves multi-step reasoning, tool selection, and argument construction. Findings may not generalize to larger models or naturalistic prompts.
+</Warning>
+
+Key caveats:
+- Aggressive zero-ablation (more destructive than mean-ablation)
+- Pretrained SAEs (not trained on our fine-tuned model)
+- All examples follow same template structure
+- Limited seed/checkpoint coverage
+- GPU-targeted but can run on CPU (slower)
+
+## Next Steps
+
+<CardGroup cols={1}>
+  <Card title="Get Started" icon="play" href="/quickstart">
+    Run the full pipeline in under 10 minutes
+  </Card>
+</CardGroup>
+
+---
+
+**Citation**: If you use this project, start with `RESULTS.md` for the full experimental narrative and caveats.

@@ -1,0 +1,340 @@
+---
+title: 'Detailed Findings'
+description: 'In-depth analysis results from activation patching, DLA, SAE features, and ablation experiments'
+---
+
+## Activation Patching Results
+
+Activation patching measures **causal importance** by swapping each head's output between tool-needed and tool-not-needed prompts.
+
+### Top Heads by Patching Score
+
+The patching importance is **distributed across multiple mid-layer heads**:
+
+<AccordionGroup>
+  <Accordion title="Top 15 Heads (Full Rankings)">
+    | Rank | Head | Patching Score | Layer Position |
+    |------|------|----------------|----------------|
+    | 1 | **L7H6** | **0.606** | Mid-network |
+    | 2 | **L2H1** | **0.592** | Early network |
+    | 3 | **L6H2** | **0.559** | Mid-network |
+    | 4 | L4H2 | 0.384 | Mid-network |
+    | 5 | L10H4 | 0.351 | Late network |
+    | 6 | L9H5 | 0.322 | Pre-readout |
+    | 7 | L11H4 | 0.303 | Late readout |
+    | 8 | L5H9 | 0.273 | Mid-layer support |
+    | 9 | L5H10 | 0.271 | Mid-layer support |
+    | 10 | L10H5 | 0.244 | Major readout head |
+    | 11 | L10H8 | 0.143 | Readout |
+    | 12 | L10H1 | 0.098 | Readout |
+    | 13 | L11H7 | 0.097 | Primary readout |
+    | 14 | L9H10 | 0.083 | Pre-readout |
+    | 15 | L11H8 | 0.069 | Dominant readout |
+  </Accordion>
+</AccordionGroup>
+
+<Info>
+  **Key observation**: The top three heads (L7H6, L2H1, L6H2) are within **8% of each other**. There is **no single "tool decision head"** — a dramatic contrast to the original analysis where L6H4 scored 4.28 (3× higher than any other).
+</Info>
+
+### Comparison to Original Analysis
+
+| Metric | Original (Unbalanced) | Balanced Dataset |
+|--------|------------------------|------------------|
+| **Top head** | L6H4 | L7H6 |
+| **Max score** | 4.28 | 0.606 |
+| **Top-3 spread** | ~70% range | ~8% range |
+| **L6H4 rank** | #1 | Outside top 15 (~0) |
+
+**L6H4 became irrelevant** when numbers were balanced across classes. This proves its original dominance was driven by number-detection shortcuts.
+
+### Layer Distribution
+
+Importance is spread across multiple layers:
+
+- **Early layers (L2)**: L2H1 (#2, score 0.592)
+- **Mid layers (L4-L7)**: L4H2, L5H9, L5H10, L6H2, L7H6
+- **Late layers (L9-L11)**: L9H5, L9H10, L10H1, L10H4, L10H5, L10H8, L11H4, L11H7, L11H8
+
+<Tip>
+  Early-layer contribution (L2H1) suggests that early feature extraction is critical for learning the task.
+</Tip>
+
+## Direct Logit Attribution (DLA)
+
+DLA decomposes the final logit difference into **additive contributions** from each component.
+
+### Top Heads by DLA Score
+
+| Rank | Head | DLA Score | Role |
+|------|------|-----------|------|
+| 1 | **L11H8** | **13.43** | Largest direct contributor to tool logit |
+| 2 | **L10H5** | **6.36** | Late-layer readout |
+| 3 | **L11H7** | **5.23** | Late-layer readout |
+| 4 | L11H4 | 3.40 | Late-layer readout |
+| 5 | L10H1 | 2.96 | Late-layer readout |
+| 6 | L9H10 | 2.13 | Pre-readout |
+| 7 | L10H8 | 1.97 | Readout |
+| 8 | L10H4 | 1.58 | Mixed role |
+| 9 | L6H2 | 1.38 | Mid-layer with moderate DLA |
+| 10 | L5H10 | 0.61 | Mid-layer support |
+
+### Compute → Readout Dissociation
+
+The **most important heads by patching** have **low DLA scores**:
+
+<CodeGroup>
+```json L7H6 (Top Patching)
+{
+  "patching_score": 0.606,
+  "patching_rank": 1,
+  "dla_score": 0.202,
+  "dla_rank": "~50th",
+  "role": "Computes intermediate features"
+}
+```
+
+```json L2H1 (2nd Patching)
+{
+  "patching_score": 0.592,
+  "patching_rank": 2,
+  "dla_score": 0.062,
+  "dla_rank": "~100th",
+  "role": "Early feature extraction"
+}
+```
+
+```json L11H8 (Top DLA)
+{
+  "patching_score": 0.069,
+  "patching_rank": 15,
+  "dla_score": 13.43,
+  "dla_rank": 1,
+  "role": "Reads signal, writes to logits"
+}
+```
+</CodeGroup>
+
+<Warning>
+  This dissociation is evidence for a **two-stage architecture**:
+  
+  1. **Early/mid-network computation** (L2–L7): Process input, write "needs tool" signal
+  2. **Late-network readout** (L9–L11): Read signal, translate to logit differences
+</Warning>
+
+## SAE Feature Analysis
+
+Sparse autoencoders (SAE) decompose residual stream activations into interpretable features.
+
+### Top 20 Features by Cohen's d
+
+We analyzed layer 9 SAE features (24,576 total). The top 20 by effect size:
+
+| Rank | Feature | Cohen's d | Tool Mean | No-Tool Mean | Pattern |
+|------|---------|-----------|-----------|--------------|----------|
+| 1 | 3633 | **-19.38** | 0.00 | 11.41 | Silent on tool, active on no-tool |
+| 2 | 15917 | **-19.02** | 0.00 | 13.51 | Silent on tool, active on no-tool |
+| 3 | 21369 | **-18.45** | 0.00 | 60.69 | Silent on tool, very active on no-tool |
+| 4 | 21149 | **-16.28** | 0.67 | 13.58 | Weak on tool, strong on no-tool |
+| 5 | 8270 | -15.90 | 0.00 | 36.66 | Silent on tool, active on no-tool |
+| 6 | 21604 | -15.67 | 0.00 | 13.97 | Silent on tool, active on no-tool |
+| 7 | 2389 | -15.34 | 0.00 | 10.47 | Silent on tool, active on no-tool |
+| 8 | 5932 | -15.18 | 0.00 | 11.20 | Silent on tool, active on no-tool |
+| 9 | 9982 | -14.77 | 0.00 | 35.09 | Silent on tool, active on no-tool |
+| 10 | 18203 | -14.69 | 0.00 | 10.28 | Silent on tool, active on no-tool |
+| ... | ... | ... | ... | ... | ... |
+| 20 | 17724 | -12.21 | 0.00 | 8.93 | Silent on tool, active on no-tool |
+
+<Note>
+  **All 20 top features are no-tool-favoring** (negative Cohen's d). This is strikingly different from the original analysis, which found a balanced mix.
+</Note>
+
+### Interpretation
+
+The asymmetry suggests:
+
+- SAE features (pretrained on general web text) align more naturally with "static knowledge" (no-tool)
+- The model identifies tool-call by the **absence of no-tool features** rather than presence of dedicated tool features
+- This may reflect the SAE basis not being optimized for this specific task
+
+## Causal SAE Feature Patching
+
+We tested whether the top 20 SAE features are **causally important** by zeroing each individually.
+
+### Results
+
+<Card title="Individual Feature Effects" icon="circle-exclamation">
+  **All 20 features produce ~0.000 change** in model logit difference when patched out individually.
+  
+  - Mean baseline logit diff: **-0.323**
+  - Per-feature interventions: remain near baseline after rounding
+  - Largest correlational features (d > 19) are **causally inert**
+</Card>
+
+### Positive Controls
+
+To verify the intervention pathway works:
+
+| Intervention | Mean Logit Shift | Interpretation |
+|--------------|------------------|----------------|
+| Ablate L2H1 (known causal) | -0.065 | Modest effect, as expected |
+| Strong control at SAE hook | 4.159 (mean abs) | Pathway can move logits |
+| Individual SAE features | ~0.000 | Effects are distributed |
+
+<Warning>
+  **Key finding**: Features with enormous observational effect sizes (Cohen's d > 19) can be completely causally inert. 
+  
+  **Lesson**: Correlation-based interpretability methods (including standard SAE feature analysis) can produce deeply misleading results. **Causal interventions are non-negotiable** for mechanistic claims.
+</Warning>
+
+## Circuit Ablation Results
+
+### Default Ablation (30 cases)
+
+| Test | Setup | Accuracy | Interpretation |
+|------|-------|----------|----------------|
+| Full model | No ablation | 99.5% | Baseline |
+| **Sufficiency** | Keep 15, zero 129 | **50.0%** | Circuit NOT sufficient |
+| **Necessity** | Zero 15, keep 129 | **100.0%** | Circuit near-non-necessary |
+
+### Ablation Stress Test (400 balanced cases)
+
+Expanded evaluation set confirms the finding:
+
+- **Sufficiency**: 0.5000 (200/400 correct) — remains at chance
+- **Necessity**: 0.9975 (399/400 correct) — near-perfect without circuit
+
+<Info>
+  **Conclusion**: The selected 15 heads are **not sufficient and are near-non-necessary** at this operating point.
+</Info>
+
+### Circuit Size Sweep (100 balanced cases)
+
+How many heads are needed for sufficiency?
+
+| Heads Kept | Heads Ablated | Sufficiency | Necessity |
+|------------|---------------|-------------|------------|
+| 15 | 129 | 50% | 100% |
+| 30 | 114 | 50% | 100% |
+| 60 | 84 | **86%** | 55% |
+| 100 | 44 | **99%** | 50% |
+| 140 | 4 | **100%** | 50% |
+
+<Tip>
+  **Interpretation**: Behavior appears **distributed/redundant**. Performance is recovered only when large fractions of heads (60+) are retained. Many overlapping subsets can independently reconstruct the decision.
+</Tip>
+
+## Attention Pattern Analysis
+
+We examined what tokens key heads attend to.
+
+### L6H4 (Originally Dominant Head)
+
+With balanced data, L6H4 no longer acts as a number detector:
+
+| Token Type | Tool Prompts | No-Tool Prompts |
+|------------|--------------|------------------|
+| Other tokens | **86.9%** | **93.6%** |
+| Punctuation | 10.4% | 5.0% |
+| Tool names | 1.7% | 0.8% |
+| **Numbers** | **0.6%** | **0.2%** |
+| Question words | 0.4% | 0.3% |
+
+<Info>
+  L6H4 now predominantly attends to the "User" token and generic context tokens in both classes. **Number attention dropped from dominant to negligible** — confirming its original behavior was a surface-feature shortcut.
+</Info>
+
+## Per-Tool-Type Circuit Analysis
+
+Does the model use different circuits for different tool types?
+
+### Top Heads by Tool Type
+
+| Tool Type | Top Head | Score | 2nd Head | Score |
+|-----------|----------|-------|----------|-------|
+| **Calculator** | **L2H1** | **0.94** | L7H6 | 0.74 |
+| **Lookup** | **L2H1** | **1.44** | L7H6 | 0.85 |
+| **Datetime** | **L2H1** | **0.79** | L6H2 | 0.70 |
+| **Unit Conversion** | **L2H1** | **1.98** | L6H2 | 0.70 |
+
+### Cross-Type Top-10 Overlap
+
+| Tool Pair | Overlap |
+|-----------|----------|
+| Calculator ↔ Lookup | 9/10 |
+| Calculator ↔ Datetime | 9/10 |
+| Calculator ↔ Unit Conversion | 10/10 |
+| Lookup ↔ Datetime | 10/10 |
+| Lookup ↔ Unit Conversion | 9/10 |
+| Datetime ↔ Unit Conversion | 9/10 |
+
+<Card title="Key Finding" icon="sitemap">
+  **The model uses a single unified circuit for all tool types**, with 8-10/10 overlap across all pairs. L2H1 dominates for 3 of 4 tool types, suggesting it performs general "needs external processing" detection that is **tool-type-agnostic**.
+</Card>
+
+## Adversarial Probing
+
+We tested 50 adversarial examples designed to break surface-level strategies.
+
+### Results by Category
+
+| Category | Description | Accuracy | Examples |
+|----------|-------------|----------|----------|
+| **Numbers, no tool** | Static facts with numbers | **73.3%** (11/15) | "What year was the Eiffel Tower built?" |
+| **No numbers, tool needed** | Queries without number keywords | **100%** (15/15) | "What's the weather right now in Austin?" |
+| **Computation-adjacent definitions** | Conceptual questions | **100%** (10/10) | "What does it mean to calculate a derivative?" |
+| Standard tool (sanity) | Typical tool examples | 100% (5/5) | — |
+| Standard no-tool (sanity) | Typical no-tool examples | 80% (4/5) | — |
+
+**Overall adversarial accuracy: 90% (45/50)**
+
+### Notable Failures
+
+All failures are in the "numbers, no tool needed" category:
+
+<AccordionGroup>
+  <Accordion title="Example Failures (4 cases)">
+    1. *"In what year did World War 2 end?"* → predicted **tool_call** (logit diff +4.20)
+    2. *"What is the boiling point of water in Fahrenheit?"* → predicted **tool_call** (logit diff +5.17)
+    3. *"What temperature does water freeze at in Celsius?"* → predicted **tool_call** (logit diff +9.32)
+    4. *"How many paintings did Van Gogh create?"* → predicted **tool_call** (logit diff +5.53)
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  **Interpretation**: The model operates at a coarser granularity than "does this require execution?" It appears to use a heuristic closer to:
+  
+  *"Does this question reference a specific quantity that could change or require computation?"*
+  
+  This treats some static-knowledge quantities (boiling point, artwork counts) as requiring lookup.
+</Warning>
+
+## Seed Robustness
+
+We ran activation patching with 20 pairs at two different seeds (42 vs 123).
+
+### Results
+
+| Metric | Value |
+|--------|-------|
+| Spearman rank correlation (all 144 heads) | **0.995** |
+| Top-10 overlap | **10/10** |
+| Top-20 overlap | **20/20** |
+| Top head (seed 42) | L7H6 |
+| Top head (seed 123) | L2H1 |
+
+<Tip>
+  **Global ranking is highly stable** despite a top-head swap. The distributed nature of the circuit means no single head dominates consistently, but the overall importance distribution is robust.
+</Tip>
+
+## Summary
+
+The detailed findings reveal:
+
+1. **Distributed importance**: No single head dominates; top scores within 8%
+2. **Compute → readout dissociation**: Patching and DLA identify different heads
+3. **SAE features are epiphenomenal**: Enormous correlational signals (d > 19) have zero causal effect individually
+4. **Circuit is redundant**: Not sufficient (50%) and near-non-necessary (100%)
+5. **Unified tool-type circuit**: 8-10/10 head overlap across all tool types
+6. **Robust rankings**: Spearman 0.995 correlation across seeds
+7. **Genuine but imperfect reasoning**: 100% on tools-without-numbers, but 73.3% on numbers-without-tools

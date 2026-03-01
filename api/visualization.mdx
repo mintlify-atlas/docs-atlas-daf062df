@@ -1,0 +1,144 @@
+---
+title: 'Visualization Module'
+description: 'Heatmaps and plots for interpretability analysis results'
+---
+
+## Overview
+
+The visualization module creates publication-ready heatmaps and distribution plots for activation patching, direct logit attribution, and SAE feature analysis results.
+
+---
+
+## plot_patching_heatmap
+
+Render activation patching importance as a 12×12 annotated heatmap.
+
+```python
+from visualization.heatmaps import plot_patching_heatmap
+from pathlib import Path
+import numpy as np
+
+importance = np.random.randn(12, 12)  # From run_activation_patching
+fig = plot_patching_heatmap(
+    importance_matrix=importance,
+    title="Activation Patching — Tool-Calling Circuit",
+    save_path=Path("outputs/patching_heatmap")
+)
+# Saves: outputs/patching_heatmap.html and outputs/patching_heatmap.png
+```
+
+<ParamField path="importance_matrix" type="np.ndarray" required>
+  (n_layers, n_heads) array with float values representing logit-diff change when each head is patched. Must match model architecture dimensions from CONFIG.
+</ParamField>
+
+<ParamField path="title" type="str" required>
+  Title for the heatmap plot.
+</ParamField>
+
+<ParamField path="save_path" type="Path" required>
+  File path stem for output (extensions .html and .png will be added).
+</ParamField>
+
+<ResponseField name="fig" type="go.Figure">
+  Plotly Figure object with the rendered heatmap.
+</ResponseField>
+
+**Raises:**
+- `ValueError` if importance_matrix shape doesn't match (n_layers, n_heads)
+- `TypeError` if importance_matrix is not a numpy array
+
+**Notes:**
+- Uses diverging RdBu colorscale centered at zero
+- Blue heads suppress tool decisions, red heads promote them
+- Annotations show values rounded to 3 decimal places
+- Layer 0 appears at top (reversed y-axis)
+
+---
+
+## plot_dla_heatmap
+
+Render direct logit attribution as a 12×12 annotated heatmap.
+
+```python
+from visualization.heatmaps import plot_dla_heatmap
+
+fig = plot_dla_heatmap(
+    dla_matrix=head_dla,
+    title="Direct Logit Attribution — Per-Head Contributions",
+    save_path=Path("outputs/dla_heatmap")
+)
+```
+
+<ParamField path="dla_matrix" type="np.ndarray" required>
+  (n_layers, n_heads) array with float DLA values.
+</ParamField>
+
+<ParamField path="title" type="str" required>
+  Title for the heatmap plot.
+</ParamField>
+
+<ParamField path="save_path" type="Path" required>
+  File path stem for output (extensions .html and .png will be added).
+</ParamField>
+
+<ResponseField name="fig" type="go.Figure">
+  Plotly Figure object with the rendered heatmap.
+</ResponseField>
+
+**Raises:**
+- `ValueError` if dla_matrix shape doesn't match (n_layers, n_heads)
+- `TypeError` if dla_matrix is not a numpy array
+
+**Notes:**
+- Uses Viridis (sequential) colorscale for magnitude visualization
+- DLA magnitudes typically all-positive after projection onto logit direction
+- Saves both interactive HTML and static PNG versions
+
+---
+
+## plot_feature_ranking
+
+Bar chart of Cohen's d values for top SAE features, sorted by magnitude.
+
+```python
+from visualization.feature_plots import plot_feature_ranking
+
+feature_ids = [1423, 892, 3341, 2104, 756]
+cohen_ds = [1.23, -0.98, 0.87, 0.76, -0.65]
+
+fig = plot_feature_ranking(
+    feature_ids=feature_ids,
+    cohen_ds=cohen_ds,
+    layer=7,
+    save_path=Path("outputs/feature_ranking_layer7")
+)
+```
+
+<ParamField path="feature_ids" type="list[int]" required>
+  List of SAE feature IDs to plot. Must be non-empty.
+</ParamField>
+
+<ParamField path="cohen_ds" type="list[float]" required>
+  Cohen's d effect size values for each feature (same length as feature_ids).
+</ParamField>
+
+<ParamField path="layer" type="int" required>
+  Transformer layer index for the plot title.
+</ParamField>
+
+<ParamField path="save_path" type="Path" required>
+  File path stem for output (extensions .html and .png will be added).
+</ParamField>
+
+<ResponseField name="fig" type="go.Figure">
+  Plotly Figure object with horizontal bar chart.
+</ResponseField>
+
+**Raises:**
+- `ValueError` if feature_ids and cohen_ds have different lengths or if feature_ids is empty
+
+**Notes:**
+- Features sorted by descending |Cohen's d| (highest at top)
+- Positive d (tool-favoring) in blue, negative d (no-tool favoring) in red
+- Includes dashed reference lines at d=±0.5 (medium effect size threshold)
+- Height scales with number of features for readability

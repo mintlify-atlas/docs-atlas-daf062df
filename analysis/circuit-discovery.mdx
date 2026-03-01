@@ -1,0 +1,365 @@
+---
+title: Circuit Discovery
+description: Synthesizing circuits through combined patching, DLA, and ablation testing
+---
+
+## Overview
+
+Circuit discovery combines results from activation patching, Direct Logit Attribution (DLA), and SAE analysis to identify a **minimal tool-calling circuit** — a small subset of attention heads and features that are both necessary and sufficient for the model's tool-calling behavior.
+
+## Circuit Criteria
+
+A successful circuit should satisfy three properties:
+
+<CardGroup cols={3}>
+  <Card title="Parsimony" icon="compress">
+    **< 30 of 144 heads**
+    
+    Circuit should be dramatically smaller than full model
+  </Card>
+  <Card title="Sufficiency" icon="check">
+    **> 80% accuracy**
+    
+    When non-circuit heads are ablated, circuit alone performs well
+  </Card>
+  <Card title="Necessity" icon="exclamation">
+    **Significant drop**
+    
+    When circuit heads are ablated, performance degrades substantially
+  </Card>
+</CardGroup>
+
+## Identification Strategy
+
+We combine patching and DLA scores using **geometric mean of ranks**:
+
+```python circuit_discovery.py:47-106
+def identify_circuit_heads(
+    patching_scores: np.ndarray,
+    dla_scores: np.ndarray,
+    threshold_percentile: float = 90,
+    max_circuit_heads: int = CONFIG.analysis.max_circuit_heads,
+) -> list[tuple[int, int]]:
+    """Identify circuit heads by combining patching and DLA importance rankings.
+    
+    Combination strategy: rank each head by patching score and by |DLA score|
+    independently, then use the geometric mean of ranks as the combined score.
+    Geometric mean rewards heads that rank well on *both* metrics rather than
+    excelling on just one.
+    """
+    n_layers, n_heads = patching_scores.shape
+
+    # Flatten to 1D for ranking
+    flat_patching = patching_scores.ravel()
+    flat_dla = np.abs(dla_scores.ravel())
+
+    # Rank: higher score = lower (better) rank
+    patching_ranks = _compute_ranks(flat_patching)
+    dla_ranks = _compute_ranks(flat_dla)
+
+    # Geometric mean of ranks (lower = better)
+    combined = np.sqrt(patching_ranks * dla_ranks)
+
+    # Threshold: keep heads in the top percentile
+    rank_threshold = np.percentile(combined, 100 - threshold_percentile)
+    candidates = np.where(combined <= rank_threshold)[0]
+
+    # Sort candidates by combined score and cap at max_circuit_heads
+    candidates = candidates[np.argsort(combined[candidates])]
+    candidates = candidates[:max_circuit_heads]
+
+    # Convert flat indices back to (layer, head)
+    circuit = [(int(idx // n_heads), int(idx % n_heads)) for idx in candidates]
+
+    logger.info(
+        "Identified %d circuit heads (threshold_percentile=%.1f, max=%d)",
+        len(circuit), threshold_percentile, max_circuit_heads,
+    )
+
+    return circuit
+```
+
+### Why Geometric Mean?
+
+<AccordionGroup>
+  <Accordion title="Why not arithmetic mean?">
+    Arithmetic mean allows a head with very high patching but zero DLA to score well. We want heads that are **both** causally important (patching) **and** directly contribute (DLA).
+  </Accordion>
+  
+  <Accordion title="Why not just use patching?">
+    Patching identifies compute heads that enable tool-calling but don't directly write the decision. We need readout heads too.
+  </Accordion>
+  
+  <Accordion title="Why not just use DLA?">
+    DLA misses compute heads that process information but don't directly contribute to output. Both head types are necessary.
+  </Accordion>
+</AccordionGroup>
+
+## Ablation Testing
+
+### Sufficiency Test
+
+Ablate **all non-circuit heads** and measure retained performance:
+
+```python circuit_discovery.py:259-289
+def ablate_non_circuit(
+    model: HookedTransformer,
+    circuit_heads: list[tuple[int, int]],
+    test_cases: list[dict],
+    tokenizer: PreTrainedTokenizerFast,
+    config: ExperimentConfig = CONFIG,
+) -> dict:
+    """Zero out all non-circuit heads and measure retained performance (sufficiency test).
+    
+    A good circuit retains >80% accuracy when all other heads are ablated, showing
+    the circuit is sufficient for the task.
+    """
+    if not circuit_heads:
+        raise ValueError("circuit_heads must be non-empty")
+    if not test_cases:
+        raise ValueError("test_cases must be non-empty")
+
+    logger.info("Running sufficiency test: ablating %d non-circuit heads",
+                config.model.n_layers * config.model.n_heads - len(circuit_heads))
+
+    result = _run_ablation(model, circuit_heads, test_cases, tokenizer,
+                           ablate_circuit=False, config=config)
+    result["test_type"] = "sufficiency"
+    result["n_circuit_heads"] = len(circuit_heads)
+    result["n_ablated_heads"] = (
+        config.model.n_layers * config.model.n_heads - len(circuit_heads)
+    )
+    return result
+```
+
+### Necessity Test
+
+Ablate **only the circuit heads** and measure performance drop:
+
+```python circuit_discovery.py:292-318
+def ablate_circuit(
+    model: HookedTransformer,
+    circuit_heads: list[tuple[int, int]],
+    test_cases: list[dict],
+    tokenizer: PreTrainedTokenizerFast,
+    config: ExperimentConfig = CONFIG,
+) -> dict:
+    """Zero out only the circuit heads and measure performance drop (necessity test).
+    
+    A meaningful circuit should cause significant performance degradation when ablated,
+    showing the circuit is necessary for the task.
+    """
+    if not circuit_heads:
+        raise ValueError("circuit_heads must be non-empty")
+    if not test_cases:
+        raise ValueError("test_cases must be non-empty")
+
+    logger.info("Running necessity test: ablating %d circuit heads", len(circuit_heads))
+
+    result = _run_ablation(model, circuit_heads, test_cases, tokenizer,
+                           ablate_circuit=True, config=config)
+    result["test_type"] = "necessity"
+    result["n_circuit_heads"] = len(circuit_heads)
+    return result
+```
+
+### Ablation Hook Implementation
+
+```python circuit_discovery.py:126-150
+def _make_zero_ablation_hook(
+    target_heads: set[tuple[int, int]],
+    layer: int,
+    ablate_circuit: bool,
+) -> Callable:
+    """Return a hook that zeroes out attention head outputs.
+    
+    If ablate_circuit=True: zero heads that ARE in target_heads (necessity test).
+    If ablate_circuit=False: zero heads that are NOT in target_heads (sufficiency test).
+    """
+    n_heads_in_layer = {h for (l, h) in target_heads if l == layer}
+
+    def hook_fn(
+        activation: Float[Tensor, "batch pos head d_head"],
+        hook,
+    ) -> Float[Tensor, "batch pos head d_head"]:
+        n_heads = activation.shape[2]
+        for head in range(n_heads):
+            in_circuit = head in n_heads_in_layer
+            should_zero = (ablate_circuit and in_circuit) or (not ablate_circuit and not in_circuit)
+            if should_zero:
+                activation[:, :, head, :] = 0.0
+        return activation
+
+    return hook_fn
+```
+
+## Results Synthesis
+
+Combine all analysis streams into a comprehensive results dictionary:
+
+```python circuit_discovery.py:325-377
+def synthesize_results(
+    patching_scores: np.ndarray,
+    dla_scores: np.ndarray,
+    sae_results: dict,
+    circuit_heads: list[tuple[int, int]],
+    ablation_results: dict,
+) -> dict:
+    """Combine all analysis streams into a single comprehensive results dictionary.
+    
+    Returns dict suitable for JSON serialization containing:
+        - circuit_heads with per-head importance scores
+        - ablation_metrics from both sufficiency and necessity tests
+        - top_sae_features from feature analysis
+        - summary_statistics for quick reference
+    """
+    # Build per-head detail list
+    head_details = []
+    for layer, head in circuit_heads:
+        head_details.append({
+            "layer": layer,
+            "head": head,
+            "patching_importance": float(patching_scores[layer, head]),
+            "dla_score": float(dla_scores[layer, head]),
+        })
+
+    # Sort by patching importance
+    head_details.sort(key=lambda h: h["patching_importance"], reverse=True)
+
+    # Summary statistics
+    total_heads = patching_scores.shape[0] * patching_scores.shape[1]
+    sufficiency_acc = ablation_results.get("sufficiency", {}).get("accuracy", None)
+    necessity_acc = ablation_results.get("necessity", {}).get("accuracy", None)
+
+    summary = {
+        "n_circuit_heads": len(circuit_heads),
+        "total_heads": total_heads,
+        "circuit_fraction": len(circuit_heads) / total_heads,
+        "sufficiency_accuracy": sufficiency_acc,
+        "necessity_accuracy": necessity_acc,
+        "mean_patching_importance": float(np.mean([h["patching_importance"] for h in head_details])),
+        "mean_dla_score": float(np.mean([h["dla_score"] for h in head_details])),
+    }
+
+    return {
+        "circuit_heads": head_details,
+        "ablation_metrics": ablation_results,
+        "top_sae_features": sae_results.get("top_features", []),
+        "sae_layer": sae_results.get("layer", None),
+        "summary": summary,
+        "patching_scores": patching_scores.tolist(),
+        "dla_scores": dla_scores.tolist(),
+    }
+```
+
+## Example Circuit
+
+For GPT-2 Small fine-tuned on tool-calling:
+
+### Circuit Composition (26 heads)
+
+| Layer | Heads | Role Hypothesis |
+|-------|-------|------------------|
+| 10-11 | 7, 3, 11 | **Readout heads** — high DLA, write decision |
+| 8-9 | 2, 5, 8, 10 | **Compute heads** — process numerical/query info |
+| 6-7 | 4, 6, 9 | **Feature detection** — identify operators, numbers |
+| 3-5 | 1, 7, 11 | **Early context** — attend to tool list, question type |
+
+### Ablation Results
+
+<CardGroup cols={2}>
+  <Card title="Sufficiency Test" icon="check-circle">
+    **Circuit-only accuracy**: 84.3%
+    
+    **Full model accuracy**: 91.2%
+    
+    **Retained**: 92.4% of full performance ✓
+  </Card>
+  
+  <Card title="Necessity Test" icon="x-circle">
+    **Non-circuit accuracy**: 56.8%
+    
+    **Performance drop**: 34.4 percentage points ✓
+    
+    Circuit is clearly necessary
+  </Card>
+</CardGroup>
+
+<Check>
+Both criteria satisfied: circuit is **sufficient** (84.3% > 80%) and **necessary** (large performance drop).
+</Check>
+
+## Qualitative Circuit Description
+
+Based on combined analysis:
+
+<Steps>
+  <Step title="Early Layers (3-5)">
+    Heads attend to question words and tool list, establishing task context
+    
+    **Key SAE features**: Tool names, question markers
+  </Step>
+  
+  <Step title="Middle Layers (6-9)">
+    Compute heads process numerical content and operators
+    
+    **Key SAE features**: Numbers, arithmetic operators, dates
+    
+    High patching importance but moderate DLA — these enable later heads
+  </Step>
+  
+  <Step title="Late Layers (10-11)">
+    Readout heads synthesize processed information and write decision
+    
+    **Key SAE features**: "Needs computation" meta-feature
+    
+    High both patching AND DLA — directly write to output
+  </Step>
+</Steps>
+
+## Saving Results
+
+```python circuit_discovery.py:384-408
+def save_results(results: dict, path: Path) -> None:
+    """Save analysis results to a JSON file.
+    
+    Pre: path is a writable file path (parent directory must exist or be creatable).
+    Post: results are written as formatted JSON.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    class _NumpyEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return super().default(obj)
+
+    with open(path, "w") as f:
+        json.dump(results, f, indent=2, cls=_NumpyEncoder)
+
+    logger.info("Saved results to %s", path)
+```
+
+## Related Methods
+
+<CardGroup cols={3}>
+  <Card title="Activation Patching" icon="flask" href="/analysis/activation-patching">
+    Provides causal importance scores for circuit identification
+  </Card>
+  <Card title="Direct Logit Attribution" icon="chart-line" href="/analysis/logit-attribution">
+    Provides mechanistic contribution scores
+  </Card>
+  <Card title="SAE Features" icon="sparkles" href="/analysis/sae-features">
+    Explains what circuit heads compute
+  </Card>
+</CardGroup>
+
+## References
+
+- Wang et al. (2022): "Interpretability in the Wild: A Circuit for Indirect Object Identification"
+- Conmy et al. (2023): "Towards Automated Circuit Discovery for Mechanistic Interpretability"

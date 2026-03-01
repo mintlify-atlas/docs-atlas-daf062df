@@ -1,0 +1,150 @@
+---
+title: 'Fine-tuning Module'
+description: 'Model training, initialization, and evaluation utilities'
+---
+
+## Overview
+
+The fine-tuning module handles full model training on the tool-calling decision task, including model initialization with vocabulary extension, checkpoint management, and comprehensive test-set evaluation.
+
+---
+
+## Trainer
+
+Manages the full fine-tuning lifecycle: training, validation, checkpointing.
+
+```python
+from finetune.trainer import Trainer
+from finetune.model_utils import init_model_and_tokenizer
+from configs.experiment_config import CONFIG
+
+model, tokenizer = init_model_and_tokenizer()
+trainer = Trainer(model, tokenizer, train_loader, val_loader, CONFIG)
+history = trainer.train()
+```
+
+### Constructor
+
+<ParamField path="model" type="GPT2LMHeadModel" required>
+  GPT-2 model instance to train.
+</ParamField>
+
+<ParamField path="tokenizer" type="PreTrainedTokenizerFast" required>
+  Tokenizer with extended vocabulary including decision tokens.
+</ParamField>
+
+<ParamField path="train_loader" type="DataLoader" required>
+  DataLoader for training data (must be non-empty).
+</ParamField>
+
+<ParamField path="val_loader" type="DataLoader" required>
+  DataLoader for validation data (must be non-empty).
+</ParamField>
+
+<ParamField path="config" type="ExperimentConfig" required>
+  Configuration object with training hyperparameters.
+</ParamField>
+
+### train()
+
+Run the full training loop across all epochs.
+
+```python
+history = trainer.train()
+print(f"Best val loss: {min(history['val_losses'])}")
+```
+
+<ResponseField name="history" type="dict">
+  Dictionary with keys:
+  - `train_losses`: list[float] — per-epoch training losses
+  - `val_losses`: list[float] — per-epoch validation losses
+  - `val_tool_accs`: list[float] — per-epoch tool-call class accuracy
+  - `val_no_tool_accs`: list[float] — per-epoch no-tool class accuracy
+</ResponseField>
+
+**Notes:**
+- Automatically saves checkpoint for best validation loss
+- Implements early stopping based on config.train.patience
+- Uses mixed-precision training (fp16) and gradient accumulation
+- Tracks per-class accuracy to detect class collapse
+
+---
+
+## init_model_and_tokenizer
+
+Load GPT-2 Small, extend its vocabulary with decision tokens, and configure for training.
+
+```python
+from finetune.model_utils import init_model_and_tokenizer
+from configs.experiment_config import CONFIG
+
+model, tokenizer = init_model_and_tokenizer(config=CONFIG)
+```
+
+<ParamField path="config" type="ExperimentConfig" default="CONFIG">
+  Configuration object specifying model name and training settings.
+</ParamField>
+
+<ResponseField name="model" type="GPT2LMHeadModel">
+  GPT-2 model with resized embeddings and mean-initialized new token embeddings.
+</ResponseField>
+
+<ResponseField name="tokenizer" type="PreTrainedTokenizerFast">
+  Tokenizer with extended vocabulary including `<|tool_call|>` and `<|no_tool|>` tokens.
+</ResponseField>
+
+**Raises:**
+- `RuntimeError` if base model cannot be loaded from cache
+
+**Notes:**
+- New embeddings are mean-initialized from existing embeddings (not random)
+- Enables gradient checkpointing if config.train.gradient_checkpointing is True
+- Model is left on CPU; caller should move to device
+
+---
+
+## evaluate_test_set
+
+Run full evaluation on the test set with detailed metrics.
+
+```python
+from finetune.evaluator import evaluate_test_set
+
+results = evaluate_test_set(model, tokenizer, test_loader, config)
+print(f"Test accuracy: {results['accuracy']:.3f}")
+print(f"Confusion matrix: {results['confusion_matrix']}")
+```
+
+<ParamField path="model" type="GPT2LMHeadModel" required>
+  Model in eval mode.
+</ParamField>
+
+<ParamField path="tokenizer" type="PreTrainedTokenizerFast" required>
+  Tokenizer with decision tokens.
+</ParamField>
+
+<ParamField path="test_loader" type="DataLoader" required>
+  DataLoader for test data (must be non-empty).
+</ParamField>
+
+<ParamField path="config" type="ExperimentConfig" required>
+  Configuration with model token names.
+</ParamField>
+
+<ResponseField name="results" type="dict">
+  Dictionary with keys:
+  - `accuracy`: float — overall classification accuracy
+  - `tool_accuracy`: float — accuracy on tool-call examples only
+  - `no_tool_accuracy`: float — accuracy on no-tool examples only
+  - `n_examples`: int — total test examples evaluated
+  - `confusion_matrix`: dict — 2x2 confusion matrix
+  - `calibration`: dict — mean confidence for correct vs incorrect predictions
+</ResponseField>
+
+**Raises:**
+- `ValueError` if test_loader is empty
+
+**Notes:**
+- Uses softmax over just the two decision tokens for probability computation
+- Calibration metrics reveal whether model is confidently wrong
+- Per-class accuracy catches degenerate models that always predict one class

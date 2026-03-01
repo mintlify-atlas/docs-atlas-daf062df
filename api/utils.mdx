@@ -1,0 +1,268 @@
+---
+title: 'Utils Module'
+description: 'Logging and memory management utilities'
+---
+
+## Overview
+
+The utils module provides structured logging for experiment tracking and GPU memory monitoring for RTX 3060 12GB constraint management.
+
+---
+
+## Logging Utilities
+
+### setup_logger
+
+Create a logger with console (human-readable) and file (JSON-lines) handlers.
+
+```python
+from utils.logging_utils import setup_logger
+from pathlib import Path
+
+logger = setup_logger(
+    name="experiment",
+    log_dir=Path("logs"),
+    level=logging.INFO
+)
+logger.info("Experiment started")
+```
+
+<ParamField path="name" type="str" required>
+  Logger name (must be non-empty). Used for log file naming.
+</ParamField>
+
+<ParamField path="log_dir" type="Path" required>
+  Writable directory path for log files.
+</ParamField>
+
+<ParamField path="level" type="int" default="logging.INFO">
+  Logging level (e.g., logging.DEBUG, logging.INFO).
+</ParamField>
+
+<ResponseField name="logger" type="logging.Logger">
+  Logger with exactly two handlers:
+  - Console handler: human-readable format
+  - File handler: JSON-lines format to `<log_dir>/<name>.jsonl`
+</ResponseField>
+
+**Raises:**
+- `ValueError` if name is empty
+
+**Notes:**
+- Prevents duplicate handlers if called multiple times with same name
+- JSON-lines format enables machine-parseable logs for post-hoc analysis
+- All timestamps in UTC with ISO 8601 format
+
+---
+
+### log_metrics
+
+Log a metrics dictionary with phase/step context.
+
+```python
+from utils.logging_utils import log_metrics
+
+log_metrics(
+    logger=logger,
+    phase="training",
+    step=100,
+    metrics={"loss": 0.432, "accuracy": 0.91}
+)
+```
+
+<ParamField path="logger" type="logging.Logger" required>
+  Logger instance from setup_logger.
+</ParamField>
+
+<ParamField path="phase" type="str" required>
+  Experiment phase identifier (e.g., "training", "validation", "patching").
+</ParamField>
+
+<ParamField path="step" type="int" required>
+  Current step/epoch number (must be >= 0).
+</ParamField>
+
+<ParamField path="metrics" type="dict" required>
+  Non-empty dictionary of metric name -> value pairs.
+</ParamField>
+
+**Raises:**
+- `ValueError` if phase is empty, step < 0, or metrics is empty
+
+**Notes:**
+- Console shows compact summary: "training | step=100 | loss=0.432 acc=0.91"
+- JSON handler captures full metrics dict with timestamp and phase tags
+- Useful for plotting loss curves and comparing experiments
+
+---
+
+### log_phase_start
+
+Mark the beginning of an experiment phase.
+
+```python
+from utils.logging_utils import log_phase_start
+
+log_phase_start(logger, "activation_patching")
+```
+
+<ParamField path="logger" type="logging.Logger" required>
+  Logger instance.
+</ParamField>
+
+<ParamField path="phase" type="str" required>
+  Phase name (must be non-empty).
+</ParamField>
+
+**Notes:**
+- Emits structured log entry with event='phase_start'
+- Console shows: "=== Phase START: activation_patching ==="
+
+---
+
+### log_phase_end
+
+Mark the end of an experiment phase with a summary dict.
+
+```python
+from utils.logging_utils import log_phase_end
+
+log_phase_end(logger, "training", summary={"best_val_loss": 0.123, "epochs": 8})
+```
+
+<ParamField path="logger" type="logging.Logger" required>
+  Logger instance.
+</ParamField>
+
+<ParamField path="phase" type="str" required>
+  Phase name (must be non-empty).
+</ParamField>
+
+<ParamField path="summary" type="dict" required>
+  Summary dictionary (may be empty).
+</ParamField>
+
+**Notes:**
+- Emits structured log entry with event='phase_end' and the summary
+- Console shows: "=== Phase END: training | best_val_loss=0.123 epochs=8 ==="
+
+---
+
+## Memory Utilities
+
+### get_gpu_memory_stats
+
+Return current GPU memory usage as a dict with keys in GB.
+
+```python
+from utils.memory_utils import get_gpu_memory_stats
+
+stats = get_gpu_memory_stats()
+print(f"Allocated: {stats['allocated_gb']:.2f} GB")
+print(f"Peak: {stats['max_allocated_gb']:.2f} GB")
+```
+
+<ResponseField name="stats" type="dict">
+  Dictionary with keys:
+  - `allocated_gb`: float — currently allocated GPU memory
+  - `reserved_gb`: float — memory reserved by PyTorch
+  - `max_allocated_gb`: float — peak allocated memory since last reset
+  - `free_gb`: float — available GPU memory
+  
+  All values are floats >= 0. Returns zeros if CUDA is unavailable.
+</ResponseField>
+
+---
+
+### log_memory
+
+Log current GPU memory stats with a descriptive tag.
+
+```python
+from utils.memory_utils import log_memory
+
+log_memory(logger, "before_forward_pass")
+# Logs: [before_forward_pass] GPU mem: alloc=3.42GB  reserved=4.00GB  peak=3.56GB  free=8.00GB
+```
+
+<ParamField path="logger" type="logging.Logger" required>
+  Logger instance.
+</ParamField>
+
+<ParamField path="tag" type="str" required>
+  Descriptive tag for this measurement point (must be non-empty).
+</ParamField>
+
+**Raises:**
+- `ValueError` if tag is empty
+
+**Notes:**
+- Gracefully degrades when CUDA unavailable (logs debug note instead)
+- All values rounded to 2 decimal places
+
+---
+
+### clear_gpu_cache
+
+Release cached GPU memory and run Python garbage collection.
+
+```python
+from utils.memory_utils import clear_gpu_cache
+
+clear_gpu_cache()
+```
+
+**Notes:**
+- Safe to call when CUDA is unavailable (only runs gc.collect)
+- Useful between analysis phases to free memory
+- Does not free actively-used tensors
+
+---
+
+### estimate_activation_memory
+
+Rough GB estimate for storing all intermediate activations across layers.
+
+```python
+from utils.memory_utils import estimate_activation_memory
+
+est = estimate_activation_memory(
+    n_layers=12,
+    seq_len=512,
+    batch_size=8,
+    d_model=768
+)
+print(f"Estimated activation memory: {est:.2f} GB")
+
+if est > 8.0:
+    batch_size = batch_size // 2
+    print(f"Reducing batch size to {batch_size}")
+```
+
+<ParamField path="n_layers" type="int" required>
+  Number of transformer layers (must be positive).
+</ParamField>
+
+<ParamField path="seq_len" type="int" required>
+  Sequence length (must be positive).
+</ParamField>
+
+<ParamField path="batch_size" type="int" required>
+  Batch size (must be positive).
+</ParamField>
+
+<ParamField path="d_model" type="int" required>
+  Model dimension (must be positive).
+</ParamField>
+
+<ResponseField name="estimated_gb" type="float">
+  Estimated GPU memory in GB for storing activations. This is a lower bound — multiply by 3-4x for fine-tuning with gradients.
+</ResponseField>
+
+**Raises:**
+- `ValueError` if any parameter is non-positive
+
+**Notes:**
+- Formula: each layer stores (batch × seq × d_model) float32 values
+- Real usage includes attention maps, MLP intermediates, and gradient buffers
+- Useful for deciding batch sizes before committing GPU memory

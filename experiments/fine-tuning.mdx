@@ -1,0 +1,429 @@
+---
+title: Fine-Tuning
+description: Training GPT-2 Small on the tool-calling decision task
+---
+
+The fine-tuning phase trains GPT-2 Small to predict `<|tool_call|>` vs `<|no_tool|>` given a user question and available tools. Training uses mixed precision, gradient accumulation, and early stopping to achieve 99.5% test accuracy in ~2 epochs.
+
+## Model Architecture
+
+**Base model**: GPT-2 Small (124M parameters)
+
+| Component | Value |
+|-----------|-------|
+| Layers | 12 |
+| Attention heads | 12 |
+| Hidden size | 768 |
+| Vocabulary size | 50,257 → 50,259 (after adding special tokens) |
+| Context length | 1024 tokens |
+| Parameters | 124M |
+
+From `configs/experiment_config.py`:
+
+```python
+@dataclass(frozen=True)
+class ModelConfig:
+    model_name: str = "gpt2"
+    n_layers: int = 12
+    n_heads: int = 12
+    d_model: int = 768
+    tl_model_name: str = "gpt2-small"  # For TransformerLens
+```
+
+## Special Token Handling
+
+Two special tokens are added to the vocabulary:
+
+```python
+class ModelConfig:
+    tool_call_token: str = "<|tool_call|>"
+    no_tool_token: str = "<|no_tool|>"
+```
+
+### Token Initialization
+
+From `data/token_utils.py`:
+
+```python
+def extend_model_embeddings(
+    model: GPT2LMHeadModel,
+    tokenizer: PreTrainedTokenizerFast,
+) -> None:
+    """Add special tokens and initialize embeddings via mean pooling.
+    
+    Following Hewitt 2021 (https://nlp.stanford.edu/~johnhew/vocab-expansion.html),
+    new token embeddings are initialized as the mean of existing embeddings.
+    This is more stable than random initialization.
+    """
+    old_vocab_size = model.config.vocab_size
+    model.resize_token_embeddings(len(tokenizer))
+    
+    with torch.no_grad():
+        # Mean-initialize new token embeddings
+        old_embeds = model.transformer.wte.weight[:old_vocab_size]
+        mean_embed = old_embeds.mean(dim=0)
+        for new_idx in range(old_vocab_size, len(tokenizer)):
+            model.transformer.wte.weight[new_idx] = mean_embed
+```
+
+<Note>
+Mean initialization from existing embeddings is more stable than random initialization. The new tokens start with the "average" semantic position, then adapt during training.
+</Note>
+
+## Training Configuration
+
+From `configs/experiment_config.py`:
+
+```python
+@dataclass(frozen=True)
+class TrainConfig:
+    batch_size: int = 4
+    gradient_accumulation_steps: int = 4  # effective batch = 16
+    epochs: int = 3
+    lr: float = 5e-5
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.1
+    max_grad_norm: float = 1.0
+    fp16: bool = True
+    gradient_checkpointing: bool = True
+    patience: int = 5  # early stopping
+    eval_every_n_steps: int = 50
+```
+
+### Rationale
+
+<AccordionGroup>
+  <Accordion title="Why gradient accumulation?">
+    Physical batch size of 4 fits in 12GB VRAM. Effective batch size of 16 (4 × 4 accumulation) provides stable gradients for a 124M parameter model.
+  </Accordion>
+  
+  <Accordion title="Why fp16?">
+    Mixed precision (fp16) reduces memory usage by ~40% and speeds up training on modern GPUs. Loss scaling prevents underflow.
+  </Accordion>
+  
+  <Accordion title="Why gradient checkpointing?">
+    Trades compute for memory by recomputing activations during backward pass. Essential for fitting GPT-2 in 12GB VRAM.
+  </Accordion>
+  
+  <Accordion title="Why early stopping?">
+    The model converges quickly (2 epochs). Early stopping with patience=5 prevents overfitting and saves compute.
+  </Accordion>
+</AccordionGroup>
+
+## Training Loop Implementation
+
+From `finetune/trainer.py` (lines 89-131):
+
+```python
+class Trainer:
+    def train(self) -> dict:
+        """Run the full training loop across all epochs.
+        
+        Post: returns dict with keys {train_losses, val_losses, 
+                                      val_tool_accs, val_no_tool_accs}
+        """
+        history = {
+            "train_losses": [],
+            "val_losses": [],
+            "val_tool_accs": [],
+            "val_no_tool_accs": [],
+        }
+        
+        for epoch in range(self.config.train.epochs):
+            train_loss = self._train_epoch(epoch)
+            val_result = self._validate()
+            
+            history["train_losses"].append(train_loss)
+            history["val_losses"].append(val_result["val_loss"])
+            history["val_tool_accs"].append(val_result["tool_accuracy"])
+            history["val_no_tool_accs"].append(val_result["no_tool_accuracy"])
+            
+            # Early stopping check
+            if self.patience_counter >= self.config.train.patience:
+                self.logger.info("Early stopping triggered after %d rounds",
+                               self.patience_counter)
+                break
+        
+        return history
+```
+
+### Loss Computation
+
+The model is trained with standard causal language modeling loss, but **labels are masked everywhere except the decision token position**:
+
+```python
+# From finetune/trainer.py (lines 150-158)
+with autocast("cuda", enabled=self.config.train.fp16):
+    outputs = self.model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        labels=labels,  # labels = -100 everywhere except decision position
+    )
+    # Scale loss by accumulation steps
+    loss = outputs.loss / accum_steps
+
+self.scaler.scale(loss).backward()
+```
+
+Example label tensor:
+
+```
+input_ids:  [User, :, What, is, 847, *, 293, ?, \n, Available, tools, ..., Assistant, :, <|tool_call|>]
+labels:     [-100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, ..., -100, -100, 50258]
+```
+
+Only the final token (`<|tool_call|>` = 50258) contributes to the loss. This focuses the model on the binary decision.
+
+## Per-Class Accuracy Tracking
+
+The trainer tracks tool-call and no-tool accuracy separately to detect class collapse:
+
+```python
+def _count_class_predictions(
+    self,
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+) -> tuple[int, int, int, int]:
+    """Count correct predictions broken down by true class.
+    
+    Returns: (tool_correct, tool_total, no_tool_correct, no_tool_total)
+    """
+    for i in range(batch_size):
+        # Find decision position (where label != -100)
+        decision_pos = (labels[i] != -100).nonzero()[-1].item()
+        true_label = labels[i, decision_pos].item()
+        
+        # Compare logits for the two decision tokens
+        logit_pos = decision_pos - 1  # GPT-2 logits at t predict t+1
+        tool_logit = logits[i, logit_pos, self.tool_call_id]
+        no_tool_logit = logits[i, logit_pos, self.no_tool_id]
+        predicted = self.tool_call_id if tool_logit > no_tool_logit else self.no_tool_id
+        
+        if true_label == self.tool_call_id:
+            tool_total += 1
+            tool_correct += int(predicted == true_label)
+        elif true_label == self.no_tool_id:
+            no_tool_total += 1
+            no_tool_correct += int(predicted == true_label)
+```
+
+This prevents degenerate solutions where the model always predicts one class.
+
+## Training Results
+
+From `RESULTS.md`:
+
+| Metric | Value |
+|--------|-------|
+| Test accuracy | **99.5%** (995/1000) |
+| Tool-call accuracy | 100% (510/510) |
+| No-tool accuracy | 98.98% (485/490) |
+| Mean confidence (correct) | 99.97% |
+| Mean confidence (incorrect) | 1.87% |
+| Training epochs | 2 (early stopped) |
+| Training time | ~3 minutes on RTX 3060 |
+| Peak VRAM | 2.7GB |
+
+### Training Curve
+
+From the pipeline logs:
+
+```
+Epoch 1/3
+  Step 100: train_loss=0.0234, val_loss=0.0189, tool_acc=0.98, no_tool_acc=0.96
+  Step 200: train_loss=0.0089, val_loss=0.0067, tool_acc=1.00, no_tool_acc=0.99
+
+Epoch 2/3
+  Step 300: train_loss=0.0034, val_loss=0.0045, tool_acc=1.00, no_tool_acc=0.99
+  Step 400: train_loss=0.0028, val_loss=0.0041, tool_acc=1.00, no_tool_acc=0.99
+  
+Early stopping triggered after 5 eval rounds without improvement
+Best val_loss=0.0041 — checkpoint saved to checkpoints/best/
+```
+
+The model converges rapidly, reaching 99%+ validation accuracy within 200 steps (first epoch).
+
+## Error Analysis
+
+The 5 test errors (0.5%) are all false positives (no-tool examples misclassified as tool-call):
+
+```python
+# From RESULTS.md adversarial probing
+"In what year did World War 2 end?" → tool_call (logit diff +4.20)
+"What is the boiling point of water in Fahrenheit?" → tool_call (logit diff +5.17)
+"How many paintings did Van Gogh create?" → tool_call (logit diff +5.53)
+```
+
+These involve **quantities that could plausibly require lookup** (counts of artworks, temperature values). The model reasons at a coarser granularity: "question about a specific number" triggers tool-call even when the answer is common knowledge.
+
+<Info>
+The model assigns **low confidence** to its errors (mean 1.87%), suggesting they're genuinely ambiguous rather than systematic failures.
+</Info>
+
+## Checkpointing
+
+The best checkpoint (lowest validation loss) is saved to `checkpoints/best/`:
+
+```python
+def save_checkpoint(
+    model: GPT2LMHeadModel,
+    tokenizer: PreTrainedTokenizerFast,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    global_step: int,
+    val_loss: float,
+    path: Path,
+) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    
+    # Save model weights
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "epoch": epoch,
+        "global_step": global_step,
+        "val_loss": val_loss,
+    }, path / "model.pt")
+    
+    # Save tokenizer (includes special tokens)
+    tokenizer.save_pretrained(path / "tokenizer")
+```
+
+Checkpoint structure:
+
+```
+checkpoints/best/
+├── model.pt              # Model weights + optimizer state
+├── tokenizer/
+│   ├── tokenizer.json
+│   ├── vocab.json
+│   └── merges.txt
+└── metadata.json         # Training metadata
+```
+
+## Running Fine-Tuning
+
+### Via Pipeline
+
+```bash
+python run_pipeline.py --phase finetune
+```
+
+Requires `results/data/dataset.json` to exist (run data phase first if needed).
+
+### Standalone
+
+```python
+from finetune.trainer import Trainer
+from finetune.model_utils import init_model_and_tokenizer
+from data.dataset_loader import create_dataloaders
+
+model, tokenizer = init_model_and_tokenizer(CONFIG)
+train_loader, val_loader, test_loader = create_dataloaders(examples, tokenizer)
+
+trainer = Trainer(model, tokenizer, train_loader, val_loader, CONFIG)
+history = trainer.train()
+```
+
+## Memory Management
+
+From `run_pipeline.py` (lines 93-94):
+
+```python
+log_memory(logger, "finetune_start")
+# ... training ...
+clear_gpu_cache()
+log_memory(logger, "finetune_end")
+```
+
+Memory logs:
+
+```
+INFO: finetune_start — GPU: 0.3GB / 12GB
+INFO: training peak — GPU: 2.7GB / 12GB
+INFO: finetune_end — GPU: 0.3GB / 12GB (cleared)
+```
+
+<Warning>
+If you encounter OOM errors:
+1. Reduce `batch_size` to 2 (increases accumulation steps automatically)
+2. Disable gradient checkpointing if you have more VRAM
+3. Reduce `max_seq_len` to 128 in `DataConfig`
+</Warning>
+
+## Hyperparameter Tuning
+
+The default hyperparameters are tuned for this specific task. If you modify the dataset or model, consider:
+
+<Tabs>
+  <Tab title="Learning Rate">
+    ```python
+    # Default: 5e-5 (standard for GPT-2 fine-tuning)
+    # Too high: model diverges or overfits
+    # Too low: slow convergence
+    
+    class TrainConfig:
+        lr: float = 5e-5  # try [1e-5, 3e-5, 5e-5, 1e-4]
+    ```
+  </Tab>
+  
+  <Tab title="Batch Size">
+    ```python
+    # Effective batch size = batch_size * gradient_accumulation_steps
+    # Default: 4 * 4 = 16
+    
+    class TrainConfig:
+        batch_size: int = 4              # physical batch (memory bound)
+        gradient_accumulation_steps: int = 4  # accumulation (time bound)
+    ```
+  </Tab>
+  
+  <Tab title="Epochs">
+    ```python
+    # Default: 3 epochs (usually early stops at 2)
+    # More epochs risk overfitting on this synthetic dataset
+    
+    class TrainConfig:
+        epochs: int = 3
+        patience: int = 5  # stop if no improvement for 5 evals
+    ```
+  </Tab>
+</Tabs>
+
+## Training from Scratch
+
+To retrain from a fresh GPT-2 checkpoint:
+
+```bash
+# Delete existing checkpoint
+rm -rf checkpoints/best/
+
+# Run fine-tuning
+python run_pipeline.py --phase finetune
+```
+
+The model reinitializes from HuggingFace `gpt2` and trains from scratch.
+
+## Full Model Training (No LoRA)
+
+<Info>
+**Design choice**: We train the FULL model (all 124M parameters), not LoRA or adapters.
+</Info>
+
+From `RESULTS.md`:
+
+> We train the full model (not LoRA/adapters) because we want the interpretability analysis to examine how the pretrained circuits adapt to this new task, not how an adapter layer routes around them.
+
+This increases training time and memory usage but provides more interpretable circuits.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Running Analysis" icon="chart-line" href="/experiments/running-analysis">
+    Analyze the fine-tuned model with activation patching and DLA
+  </Card>
+  <Card title="Pipeline Overview" icon="diagram-project" href="/experiments/pipeline-overview">
+    Understand how fine-tuning fits into the full pipeline
+  </Card>
+</CardGroup>
