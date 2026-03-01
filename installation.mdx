@@ -475,7 +475,7 @@ docker run --gpus all -v $(pwd)/results:/workspace/results mech-interp
 Current limitation: Single-GPU only. For multi-GPU:
 
 <Warning>
-**TODO**: Wrap trainer in DistributedDataParallel. TransformerLens hooks may not play well with DDP — use `find_unused_parameters=True` or manual gradient synchronization.
+**Multi-GPU Training**: The current implementation is designed for single-GPU use. For multi-GPU training, wrap the trainer in DistributedDataParallel. Note that TransformerLens hooks may require `find_unused_parameters=True` or manual gradient synchronization for compatibility with DDP.
 </Warning>
 
 ## Next Steps

@@ -142,3 +142,44 @@ fig = plot_feature_ranking(
 - Positive d (tool-favoring) in blue, negative d (no-tool favoring) in red
 - Includes dashed reference lines at d=±0.5 (medium effect size threshold)
 - Height scales with number of features for readability
+
+---
+
+## plot_combined_importance
+
+Side-by-side comparison of activation patching and DLA heatmaps for cross-validation.
+
+```python
+from visualization.heatmaps import plot_combined_importance
+
+fig = plot_combined_importance(
+    patching=patching_scores,
+    dla=dla_scores,
+    save_path=Path("outputs/combined_importance")
+)
+```
+
+<ParamField path="patching" type="np.ndarray" required>
+  (n_layers, n_heads) array with activation patching importance scores.
+</ParamField>
+
+<ParamField path="dla" type="np.ndarray" required>
+  (n_layers, n_heads) array with direct logit attribution scores.
+</ParamField>
+
+<ParamField path="save_path" type="Path" required>
+  File path stem for output (extensions .html and .png will be added).
+</ParamField>
+
+<ResponseField name="fig" type="go.Figure">
+  Plotly Figure object with two side-by-side subplots.
+</ResponseField>
+
+**Raises:**
+- `ValueError` if matrices don't have matching shapes or don't match (n_layers, n_heads)
+
+**Notes:**
+- Left subplot shows activation patching with RdBu colorscale
+- Right subplot shows DLA with Viridis colorscale
+- Side-by-side view reveals compute→readout dissociation pattern
+- Agreement between methods strengthens circuit identification
